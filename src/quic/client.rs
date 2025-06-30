@@ -1,128 +1,64 @@
 /* src/quic/client.rs */
 
+use crate::quic::keepalive;
 use crate::setup::config::Config;
-use quinn::{ClientConfig, Connection, Endpoint};
+use quinn::{ClientConfig, Connection, ConnectionError, Endpoint};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
-async fn authenticate_with_server(
-    connection: &Connection,
-    token: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(token.as_bytes()).await?;
-    send.finish()?;
-
-    let response = timeout(Duration::from_secs(10), recv.read_to_end(1024)).await??;
-    let response_str = String::from_utf8(response)?;
-    if response_str == "AUTH_SUCCESS" {
-        println!("+ Authentication successful");
-        Ok(())
-    } else {
-        Err(format!("Authentication failed: {}", response_str).into())
-    }
-}
-
-async fn handle_connection(connection: Connection, token: String) {
-    if let Err(e) = authenticate_with_server(&connection, &token).await {
-        println!("! Authentication failed: {}", e);
-        connection.close(1u32.into(), b"auth failed");
-        return;
-    }
-
-    println!(
-        "+ Connected and authenticated to {}",
-        connection.remote_address()
-    );
-
-    tokio::spawn({
-        let connection = connection.clone();
-        async move {
-            let mut counter = 0;
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                match connection.open_bi().await {
-                    Ok((mut send, mut recv)) => {
-                        let message = format!("Hello from client #{}", counter);
-                        counter += 1;
-                        if let Err(e) = send.write_all(message.as_bytes()).await {
-                            println!("! Failed to send message: {}", e);
-                            break;
-                        }
-                        if let Err(e) = send.finish() {
-                            println!("! Failed to finish send stream: {}", e);
-                            break;
-                        }
-                        match recv.read_to_end(1024).await {
-                            Ok(response) => {
-                                let response_str = String::from_utf8_lossy(&response);
-                                println!("+ Server response: {}", response_str);
-                            }
-                            Err(e) => {
-                                println!("! Failed to read response: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!("! Failed to open stream: {}", e);
-                        break;
-                    }
-                }
+/// Main entry point for the client, now with an infinite reconnection loop.
+pub async fn start_quic_client(cfg: Config) {
+    loop {
+        println!("> Attempting to connect to the server...");
+        match connect_and_run(&cfg).await {
+            Ok(_) => {
+                println!("> Connection closed gracefully. Reconnecting in 3 seconds...");
+            }
+            Err(e) => {
+                println!("! Disconnected: {}. Reconnecting in 3 seconds...", e);
             }
         }
-    });
-
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        if connection.close_reason().is_some() {
-            println!("+ Connection closed");
-            break;
-        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
-pub async fn start_quic_client(cfg: Config) {
+/// Manages a single connection lifecycle: connects, authenticates, and handles keepalives.
+async fn connect_and_run(cfg: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // --- 1. Setup Endpoint ---
     let mut roots = RootCertStore::empty();
-    let cert_file = File::open(&cfg.setup.certificate).expect("cannot open cert file");
+    let cert_file = File::open(&cfg.setup.certificate)?;
     let mut reader = BufReader::new(cert_file);
-
     for cert_result in rustls_pemfile::certs(&mut reader) {
-        let cert = cert_result.expect("failed to parse certificate");
+        let cert = cert_result?;
         let der_bytes = cert.as_ref();
-        let len = der_bytes.len();
-        if len > 8 {
+        if der_bytes.len() > 8 {
             let head = &der_bytes[..4];
-            let tail = &der_bytes[len - 4..];
-            let fingerprint_to_log = format!(
-                "{:02X}:{:02X}:{:02X}:{:02X}:****:****:{:02X}:{:02X}:{:02X}:{:02X}",
-                head[0], head[1], head[2], head[3], tail[0], tail[1], tail[2], tail[3]
+            let tail = &der_bytes[der_bytes.len() - 4..];
+            println!(
+                "> Using root certificate (fingerprint): {:02X?}..****..{:02X?}",
+                head, tail
             );
-            println!("> Using root certificate (fingerprint): {}", fingerprint_to_log);
         }
-
-        roots.add(cert).expect("failed to add cert to root store");
+        roots.add(cert)?;
     }
-
     let tls_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
     let client_config = ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
-            .expect("failed to create QUIC client config"),
+        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?,
     ));
-
-    let mut endpoint = Endpoint::client("[::]:0".parse().unwrap()).unwrap();
+    let mut endpoint = Endpoint::client("[::]:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
-    let addr = format!("{}:{}", cfg.network.address, cfg.network.port);
-    println!("> Trying to connect to {}", addr);
-
-    // Mask the auth token for secure logging
+    // --- 2. Connect ---
+    let addr_str = format!("{}:{}", cfg.network.address, cfg.network.port);
+    let remote_addr: SocketAddr = addr_str.to_socket_addrs()?.next().ok_or("Invalid address")?;
+    
     let token_to_log = {
         let token = &cfg.setup.auth_token;
         let len = token.chars().count();
@@ -139,26 +75,80 @@ pub async fn start_quic_client(cfg: Config) {
     };
     println!("> Using auth token: {}", token_to_log);
 
-    let remote_addr = addr.to_socket_addrs().unwrap().next().unwrap();
+    let connection = endpoint.connect(remote_addr, "localhost")?.await?;
+    println!("+ Connection established with {}", connection.remote_address());
 
-    let connecting = match endpoint.connect(remote_addr, "localhost") {
-        Ok(c) => c,
-        Err(e) => {
-            println!("! Failed to start connection: {}", e);
-            return;
+    // --- 3. Authenticate ---
+    authenticate_with_server(&connection, &cfg.setup.auth_token).await?;
+
+    // --- 4. Handle the active connection (including keepalives) ---
+    handle_active_connection(connection).await
+}
+
+async fn authenticate_with_server(
+    connection: &Connection,
+    token: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    send.write_all(token.as_bytes()).await?;
+    send.finish()?;
+    let response =
+        tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(1024)).await??;
+    if response == b"AUTH_SUCCESS" {
+        println!("+ Authentication successful");
+        Ok(())
+    } else {
+        Err("Authentication failed".into())
+    }
+}
+
+/// This function contains the keepalive loop. It runs until the connection is lost.
+async fn handle_active_connection(
+    connection: Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut keepalive_interval =
+        tokio::time::interval(Duration::from_secs(keepalive::KEEPALIVE_INTERVAL_SECS));
+
+    loop {
+        tokio::select! {
+            _ = keepalive_interval.tick() => {
+                if let Err(e) = send_keepalive_ping(&connection).await {
+                    // Ping failed (timeout or other error), break the loop and signal disconnection.
+                    return Err(format!("Keepalive failed: {}", e).into());
+                }
+            },
+            // This branch detects if the connection was closed by the server or a fatal error occurred.
+            event = connection.read_datagram() => {
+                 match event {
+                    Ok(_) => {}, // Ignore datagrams for now
+                    Err(ConnectionError::LocallyClosed) => return Err("Connection closed by client".into()),
+                    Err(e) => return Err(format!("Connection error: {}", e).into()),
+                 }
+            }
+        }
+    }
+}
+
+/// Sends one keepalive ping and waits for a response, with a timeout.
+async fn send_keepalive_ping(
+    connection: &Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let ping_operation = async {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(keepalive::KEEPALIVE_HEADER.as_bytes())
+            .await?;
+        send.finish()?;
+        let response = recv.read_to_end(1024).await?;
+        if response == keepalive::KEEPALIVE_ACK_HEADER.as_bytes() {
+            Ok(())
+        } else {
+            Err("Invalid keepalive ACK".into())
         }
     };
 
-    match timeout(Duration::from_secs(5), connecting).await {
-        Ok(Ok(connection)) => {
-            let token = cfg.setup.auth_token.clone();
-            handle_connection(connection, token).await;
-        }
-        Ok(Err(e)) => {
-            println!("! Connection error: {}", e);
-        }
-        Err(_) => {
-            println!("! Connection timeout");
-        }
+    match tokio::time::timeout(Duration::from_millis(2500), ping_operation).await {
+        Ok(Ok(_)) => Ok(()), // Ping-pong successful
+        Ok(Err(e)) => Err(e), // Network or logic error during ping
+        Err(_) => Err("Keepalive response timeout".into()), // Timeout waiting for pong
     }
 }
