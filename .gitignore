@@ -1,4 +1,2 @@
 /target
-cert.crt
-cert.key
-.env
+/build

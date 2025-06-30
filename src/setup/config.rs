@@ -1,0 +1,29 @@
+use serde::Deserialize;
+use std::fs;
+
+#[derive(Deserialize)]
+pub struct SetupConfig {
+    pub mode: String,
+    pub certificate: String,
+    pub private_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct NetworkConfig {
+    pub listen: String,
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Deserialize)]
+pub struct Config {
+    pub setup: SetupConfig,
+    pub network: NetworkConfig,
+}
+
+impl Config {
+    pub fn from_file(path: &str) -> Self {
+        let content = fs::read_to_string(path).unwrap();
+        toml::from_str(&content).unwrap()
+    }
+}

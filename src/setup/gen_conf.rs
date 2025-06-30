@@ -1,0 +1,18 @@
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+
+pub fn generate_default_config<P: AsRef<Path>>(path: P) {
+    let content = r#"[setup]
+mode = "server"
+certificate = "cert.crt"
+private_key = "cert.key"
+
+[network]
+listen = "0.0.0.0"
+address = "127.0.0.1"
+port = 33321
+"#;
+    let mut file = File::create(path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+}
