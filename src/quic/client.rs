@@ -1,18 +1,22 @@
 /* src/quic/client.rs */
 
 use crate::setup::config::Config;
-use quinn::{ClientConfig, Endpoint, Connection};
+use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
-use rustls::pki_types::CertificateDer;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
-async fn authenticate_with_server(connection: &Connection, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn authenticate_with_server(
+    connection: &Connection,
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (mut send, mut recv) = connection.open_bi().await?;
     send.write_all(token.as_bytes()).await?;
+    send.finish()?;
+
     let response = timeout(Duration::from_secs(10), recv.read_to_end(1024)).await??;
     let response_str = String::from_utf8(response)?;
     if response_str == "AUTH_SUCCESS" {
@@ -30,7 +34,10 @@ async fn handle_connection(connection: Connection, token: String) {
         return;
     }
 
-    println!("+ Connected and authenticated to {}", connection.remote_address());
+    println!(
+        "+ Connected and authenticated to {}",
+        connection.remote_address()
+    );
 
     tokio::spawn({
         let connection = connection.clone();
@@ -70,7 +77,6 @@ async fn handle_connection(connection: Connection, token: String) {
         }
     });
 
-    // 保持连接活跃
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
         if connection.close_reason().is_some() {
@@ -85,16 +91,14 @@ pub async fn start_quic_client(cfg: Config) {
     let cert_file = File::open(&cfg.setup.certificate).expect("cannot open cert file");
     let mut reader = BufReader::new(cert_file);
 
-    for cert_der_result in rustls_pemfile::certs(&mut reader) {
-        let cert_der = cert_der_result.expect("failed to parse certificate");
-        let cert = CertificateDer::from(cert_der);
+    for cert_result in rustls_pemfile::certs(&mut reader) {
+        let cert = cert_result.expect("failed to parse certificate");
         roots.add(cert).expect("failed to add cert to root store");
     }
 
     let tls_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-
     let client_config = ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
             .expect("failed to create QUIC client config"),
