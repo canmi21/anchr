@@ -3,21 +3,22 @@
 use serde::Deserialize;
 use std::fs;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct SetupConfig {
     pub mode: String,
     pub certificate: String,
     pub private_key: String,
+    pub auth_token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct NetworkConfig {
     pub listen: String,
     pub address: String,
     pub port: u16,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Config {
     pub setup: SetupConfig,
     pub network: NetworkConfig,

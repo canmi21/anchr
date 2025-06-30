@@ -1,7 +1,7 @@
-// src/quic/client.rs
+/* src/quic/client.rs */
 
 use crate::setup::config::Config;
-use quinn::{ClientConfig, Endpoint};
+use quinn::{ClientConfig, Endpoint, Connection};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls::pki_types::CertificateDer;
 use std::fs::File;
@@ -9,6 +9,76 @@ use std::io::BufReader;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
+
+async fn authenticate_with_server(connection: &Connection, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    send.write_all(token.as_bytes()).await?;
+    let response = timeout(Duration::from_secs(10), recv.read_to_end(1024)).await??;
+    let response_str = String::from_utf8(response)?;
+    if response_str == "AUTH_SUCCESS" {
+        println!("+ Authentication successful");
+        Ok(())
+    } else {
+        Err(format!("Authentication failed: {}", response_str).into())
+    }
+}
+
+async fn handle_connection(connection: Connection, token: String) {
+    if let Err(e) = authenticate_with_server(&connection, &token).await {
+        println!("! Authentication failed: {}", e);
+        connection.close(1u32.into(), b"auth failed");
+        return;
+    }
+
+    println!("+ Connected and authenticated to {}", connection.remote_address());
+
+    tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            let mut counter = 0;
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                match connection.open_bi().await {
+                    Ok((mut send, mut recv)) => {
+                        let message = format!("Hello from client #{}", counter);
+                        counter += 1;
+                        if let Err(e) = send.write_all(message.as_bytes()).await {
+                            println!("! Failed to send message: {}", e);
+                            break;
+                        }
+                        if let Err(e) = send.finish() {
+                            println!("! Failed to finish send stream: {}", e);
+                            break;
+                        }
+                        match recv.read_to_end(1024).await {
+                            Ok(response) => {
+                                let response_str = String::from_utf8_lossy(&response);
+                                println!("+ Server response: {}", response_str);
+                            }
+                            Err(e) => {
+                                println!("! Failed to read response: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("! Failed to open stream: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // 保持连接活跃
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if connection.close_reason().is_some() {
+            println!("+ Connection closed");
+            break;
+        }
+    }
+}
 
 pub async fn start_quic_client(cfg: Config) {
     let mut roots = RootCertStore::empty();
@@ -35,6 +105,7 @@ pub async fn start_quic_client(cfg: Config) {
 
     let addr = format!("{}:{}", cfg.network.address, cfg.network.port);
     println!("> Trying to connect to {}", addr);
+    println!("> Using auth token: {}", cfg.setup.auth_token);
 
     let remote_addr = addr.to_socket_addrs().unwrap().next().unwrap();
 
@@ -48,11 +119,8 @@ pub async fn start_quic_client(cfg: Config) {
 
     match timeout(Duration::from_secs(5), connecting).await {
         Ok(Ok(connection)) => {
-            println!("+ Connected to {}", connection.remote_address());
-
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
+            let token = cfg.setup.auth_token.clone();
+            handle_connection(connection, token).await;
         }
         Ok(Err(e)) => {
             println!("! Connection error: {}", e);
