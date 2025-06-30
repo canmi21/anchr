@@ -1,3 +1,5 @@
+/* src/setup/config.rs */
+
 use serde::Deserialize;
 use std::fs;
 

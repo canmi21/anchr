@@ -1,3 +1,5 @@
+/* src/main.rs */
+
 mod setup;
 mod quic;
 
@@ -6,7 +8,8 @@ use setup::cert::generate_certificate;
 use setup::config::Config;
 use std::env;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
@@ -18,9 +21,9 @@ fn main() {
 
     if args.len() == 3 && args[1] == "-c" {
         let config = Config::from_file(&args[2]);
-        println!("> Mode: {}", config.setup.mode);
-        println!("> Listening on {}:{}",
-            config.network.listen, config.network.port);
+        if config.setup.mode == "server" {
+            quic::bootstrap::start_quic_server(config).await;
+        }
         return;
     }
 

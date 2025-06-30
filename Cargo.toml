@@ -7,6 +7,7 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 openssl = "0.10"
-quinn = "0.10"
+quinn = "0.11"
 tokio = { version = "1", features = ["full"] }
-rustls = "0.21"
+rustls = "0.23"
+rustls-pemfile = "2.1.0"

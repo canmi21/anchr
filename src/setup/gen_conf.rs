@@ -1,3 +1,5 @@
+/* src/setup/gen_conf.rs */
+
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
