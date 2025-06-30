@@ -1,7 +1,7 @@
 /* src/quic/bootstrap.rs */
 
 use crate::setup::config::Config;
-use quinn::{Endpoint, ServerConfig, TransportConfig, Connection};
+use quinn::{Connection, Endpoint, ServerConfig, TransportConfig};
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -64,7 +64,10 @@ async fn handle_client_connection(connection: Connection, expected_token: String
         return;
     }
 
-    println!("+ Client {} authenticated successfully", connection.remote_address());
+    println!(
+        "+ Client {} authenticated successfully",
+        connection.remote_address()
+    );
 
     loop {
         match connection.accept_bi().await {
@@ -120,7 +123,23 @@ pub async fn start_quic_server(cfg: Config) {
 
     let endpoint = Endpoint::server(server_config, addr).unwrap();
     println!("> QUIC server running on {}", addr);
-    println!("> Expected auth token: {}", cfg.setup.auth_token);
+
+    // Mask the auth token for secure logging
+    let token_to_log = {
+        let token = &cfg.setup.auth_token;
+        let len = token.chars().count();
+        if len > 4 {
+            format!(
+                "{}{}{}",
+                token.chars().next().unwrap(),
+                "*".repeat(len - 4),
+                token.chars().skip(len - 3).collect::<String>()
+            )
+        } else {
+            token.to_string()
+        }
+    };
+    println!("> Expected auth token: {}", token_to_log);
 
     while let Some(connecting) = endpoint.accept().await {
         let token = cfg.setup.auth_token.clone();

@@ -93,6 +93,18 @@ pub async fn start_quic_client(cfg: Config) {
 
     for cert_result in rustls_pemfile::certs(&mut reader) {
         let cert = cert_result.expect("failed to parse certificate");
+        let der_bytes = cert.as_ref();
+        let len = der_bytes.len();
+        if len > 8 {
+            let head = &der_bytes[..4];
+            let tail = &der_bytes[len - 4..];
+            let fingerprint_to_log = format!(
+                "{:02X}:{:02X}:{:02X}:{:02X}:****:****:{:02X}:{:02X}:{:02X}:{:02X}",
+                head[0], head[1], head[2], head[3], tail[0], tail[1], tail[2], tail[3]
+            );
+            println!("> Using root certificate (fingerprint): {}", fingerprint_to_log);
+        }
+
         roots.add(cert).expect("failed to add cert to root store");
     }
 
@@ -109,7 +121,23 @@ pub async fn start_quic_client(cfg: Config) {
 
     let addr = format!("{}:{}", cfg.network.address, cfg.network.port);
     println!("> Trying to connect to {}", addr);
-    println!("> Using auth token: {}", cfg.setup.auth_token);
+
+    // Mask the auth token for secure logging
+    let token_to_log = {
+        let token = &cfg.setup.auth_token;
+        let len = token.chars().count();
+        if len > 4 {
+            format!(
+                "{}{}{}",
+                token.chars().next().unwrap(),
+                "*".repeat(len - 4),
+                token.chars().skip(len - 3).collect::<String>()
+            )
+        } else {
+            token.to_string()
+        }
+    };
+    println!("> Using auth token: {}", token_to_log);
 
     let remote_addr = addr.to_socket_addrs().unwrap().next().unwrap();
 
