@@ -10,6 +10,10 @@ use std::env;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install default CryptoProvider");
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
@@ -23,6 +27,8 @@ async fn main() {
         let config = Config::from_file(&args[2]);
         if config.setup.mode == "server" {
             quic::bootstrap::start_quic_server(config).await;
+        } else if config.setup.mode == "client" {
+            quic::client::start_quic_client(config).await;
         }
         return;
     }
