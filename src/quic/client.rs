@@ -1,4 +1,4 @@
-/* src/quic/client.rs */
+// src/quic/client.rs
 
 use crate::setup::config::Config;
 use quinn::{ClientConfig, Endpoint};
@@ -15,22 +15,19 @@ pub async fn start_quic_client(cfg: Config) {
     let cert_file = File::open(&cfg.setup.certificate).expect("cannot open cert file");
     let mut reader = BufReader::new(cert_file);
 
-    // loading cert
     for cert_der_result in rustls_pemfile::certs(&mut reader) {
         let cert_der = cert_der_result.expect("failed to parse certificate");
-        // update for rustls 0.23
         let cert = CertificateDer::from(cert_der);
         roots.add(cert).expect("failed to add cert to root store");
     }
 
-    // open tls
     let tls_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
 
     let client_config = ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
-            .expect("failed to create QUIC client config")
+            .expect("failed to create QUIC client config"),
     ));
 
     let mut endpoint = Endpoint::client("[::]:0".parse().unwrap()).unwrap();
@@ -52,6 +49,10 @@ pub async fn start_quic_client(cfg: Config) {
     match timeout(Duration::from_secs(5), connecting).await {
         Ok(Ok(connection)) => {
             println!("+ Connected to {}", connection.remote_address());
+
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
         }
         Ok(Err(e)) => {
             println!("! Connection error: {}", e);
