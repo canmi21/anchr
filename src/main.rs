@@ -4,7 +4,6 @@ mod setup;
 mod quic;
 
 use setup::gen_conf::generate_default_config;
-use setup::cert::generate_certificate;
 use setup::config::Config;
 use std::env;
 
@@ -18,7 +17,6 @@ async fn main() {
 
     if args.len() == 1 {
         generate_default_config("anchr.toml");
-        generate_certificate("cert.crt", "cert.key");
         println!("> Default config and certificate generated");
         return;
     }
