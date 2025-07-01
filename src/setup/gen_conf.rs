@@ -7,7 +7,7 @@ use std::path::Path;
 use uuid::Uuid;
 use super::cert::generate_certificate;
 
-/// Scans for available IPv4 addresses and prompts the user to select one.
+// Scans for available IPv4 addresses and prompts the user to select one.
 fn select_ip_address() -> String {
     // Get all non-loopback IPv4 addresses from all network interfaces.
     let ipv4_addrs: Vec<String> = datalink::interfaces()
@@ -59,7 +59,7 @@ fn select_ip_address() -> String {
     }
 }
 
-/// Generates a default configuration file after prompting the user to select an IP address.
+// Generates a default configuration file after prompting the user to select an IP address.
 pub fn generate_default_config<P: AsRef<Path>>(path: P) {
     let selected_ip = select_ip_address();
     let cert_path = "cert.crt";
@@ -80,6 +80,7 @@ mode = "server"
 certificate = "{}"
 private_key = "{}"
 auth_token = "{}"
+log_level = "debug"
 
 [network]
 listen = "0.0.0.0"

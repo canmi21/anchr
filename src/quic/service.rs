@@ -1,85 +1,74 @@
 /* src/quic/service.rs */
 
-use crate::quic::keepalive;
+use crate::setup::config::Config;
+use crate::wsm::endpoints::{self, AuthState};
+use crate::wsm::header::WsmHeader;
 use quinn::Connection;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time;
 
-// Server will drop the client if no keepalive is received within this duration.
-const CLIENT_TIMEOUT_MS: u64 = 1500;
+pub async fn handle_connection(conn: Connection, cfg: Config) {
+    println!("-> Handing connection from {} to service.", conn.remote_address());
+    let auth_state = Arc::new(Mutex::new(AuthState::Unauthenticated));
 
-pub async fn handle_authenticated_client(connection: Connection) {
-    println!("+ Starting service handler for {}", connection.remote_address());
+    match conn.accept_bi().await {
+        Ok((mut control_send, mut control_recv)) => {
+            println!("  -- Control stream {} established.", control_send.id());
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
 
-    let last_ping = Arc::new(Mutex::new(Instant::now()));
-    let last_ping_clone = last_ping.clone();
-    let connection_clone = connection.clone();
-
-    // Spawn a background task to monitor for client timeouts.
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await; // Check every 500ms
-            if last_ping_clone.lock().unwrap().elapsed() > Duration::from_millis(CLIENT_TIMEOUT_MS) {
-                println!(
-                    "! Client {} timed out. Closing connection.",
-                    connection_clone.remote_address()
-                );
-                connection_clone.close(2u32.into(), b"keepalive timeout");
-                break;
-            }
-            // If connection is already closed by other means, stop this task.
-            if connection_clone.close_reason().is_some() {
-                break;
-            }
-        }
-    });
-
-    // Main loop to accept streams from the client.
-    loop {
-        match connection.accept_bi().await {
-            Ok((mut send, mut recv)) => {
-                let last_ping_update = last_ping.clone();
-                tokio::spawn(async move {
-                    // We read just enough data to see if it's a keepalive message.
-                    let mut header_buf = vec![0; keepalive::KEEPALIVE_HEADER.len()];
-                    match recv.read_exact(&mut header_buf).await {
-                        Ok(_) => {
-                            let message = String::from_utf8_lossy(&header_buf);
-                            if message.starts_with(keepalive::KEEPALIVE_HEADER) {
-                                // It's a keepalive, update the timestamp and silently send an ACK.
-                                *last_ping_update.lock().unwrap() = Instant::now();
-                                if send.write_all(keepalive::KEEPALIVE_ACK_HEADER.as_bytes()).await.is_ok() {
-                                    let _ = send.finish();
-                                }
-                            } else {
-                                // It's a generic message, handle it.
-                                let mut full_message = header_buf;
-                                if let Ok(remaining_data) = recv.read_to_end(1024 * 1024).await {
-                                    full_message.extend(remaining_data);
-                                }
-                                handle_generic_message(send, &full_message).await;
-                            }
-                        }
-                        Err(_) => { /* Stream closed or read error, do nothing. */ }
+            tokio::spawn(async move {
+                while let Some(msg_bytes) = rx.recv().await {
+                    if let Err(e) = control_send.write_all(&msg_bytes).await {
+                        println!("! Failed to send message on control stream: {}", e);
+                        break;
                     }
-                });
-            }
-            Err(_) => {
-                // Connection is closed, break the loop.
-                println!(
-                    "+ Connection handler for {} stopped.",
-                    connection.remote_address()
-                );
-                break;
+                }
+                println!("  -- Sender task for stream {} finished.", control_send.id());
+            });
+
+            let mut header_buf = [0u8; 8];
+            loop {
+                let timeout_result = time::timeout(
+                    Duration::from_millis(1500),
+                    control_recv.read_exact(&mut header_buf),
+                )
+                .await;
+
+                match timeout_result {
+                    Ok(Ok(())) => {
+                        let header = WsmHeader::from_bytes(&header_buf);
+                        if let ControlFlow::Break(_) = endpoints::dispatch_server(
+                            &header,
+                            &mut control_recv,
+                            tx.clone(),
+                            auth_state.clone(),
+                            &cfg,
+                        )
+                        .await
+                        {
+                            println!("! Dispatcher requested connection termination.");
+                            conn.close(2u32.into(), b"auth failure");
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        println!("! Read error on control stream: {}. Closing.", e);
+                        break;
+                    }
+                    Err(_) => {
+                        println!("! Watchdog timeout: No PING received in 1.5s. Closing connection.");
+                        conn.close(0u32.into(), b"keep-alive timeout");
+                        break;
+                    }
+                }
             }
         }
+        Err(e) => {
+            println!("! Failed to accept the initial control stream: {}", e);
+        }
     }
-}
-
-async fn handle_generic_message(mut send: quinn::SendStream, data: &[u8]) {
-    println!("+ Received generic message ({} bytes)", data.len());
-    // Echo the message back.
-    if send.write_all(data).await.is_ok() {
-        let _ = send.finish();
-    }
+    println!("- Connection from {} closed.", conn.remote_address());
 }

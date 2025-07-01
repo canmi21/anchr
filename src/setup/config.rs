@@ -9,6 +9,7 @@ pub struct SetupConfig {
     pub certificate: String,
     pub private_key: String,
     pub auth_token: String,
+    pub log_level: String,
 }
 
 #[derive(Deserialize, Clone)]

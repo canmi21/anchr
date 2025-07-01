@@ -2,47 +2,69 @@
 
 use crate::quic::keepalive;
 use crate::setup::config::Config;
-use quinn::{ClientConfig, Connection, ConnectionError, Endpoint};
+use crate::wsm::endpoints::{self, AuthState, InFlightPings};
+use crate::wsm::header::{PayloadType, WsmHeader};
+use crate::wsm::msg_id;
+use quinn::{ClientConfig, Endpoint};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
+use tokio::time;
 
 pub async fn start_quic_client(cfg: Config) {
+    println!("> Client starting...");
+    let mut first_failure_time: Option<Instant> = None;
+    let stop_reconnecting = Arc::new(AtomicBool::new(false));
+
     loop {
+        if stop_reconnecting.load(Ordering::SeqCst) {
+            println!("! Halting reconnection attempts due to fatal error.");
+            break;
+        }
+
         println!("> Attempting to connect to the server...");
-        match connect_and_run(&cfg).await {
+        match connect_and_run(&cfg, stop_reconnecting.clone()).await {
             Ok(_) => {
-                println!("> Connection closed gracefully. Reconnecting in 3 seconds...");
+                println!("> Connection closed gracefully. Exiting.");
+                break;
             }
             Err(e) => {
-                println!("! Disconnected: {}. Reconnecting in 3 seconds...", e);
+                if stop_reconnecting.load(Ordering::SeqCst) {
+                    println!("! Halting reconnection attempts due to fatal error: {}", e);
+                    break;
+                }
+
+                println!("! Connection error: {}. Retrying in 3 seconds...", e);
+                let now = Instant::now();
+                let first_fail = first_failure_time.get_or_insert(now);
+                if now.duration_since(*first_fail) > Duration::from_secs(30) {
+                    msg_id::clear_msg_id_pool().await;
+                    first_failure_time = None;
+                }
+                time::sleep(Duration::from_secs(3)).await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
-/// Manages a single connection lifecycle: connects, authenticates, and handles keepalives.
-async fn connect_and_run(cfg: &Config) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // --- 1. Setup Endpoint ---
+async fn connect_and_run(
+    cfg: &Config,
+    stop_reconnecting: Arc<AtomicBool>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut roots = RootCertStore::empty();
     let cert_file = File::open(&cfg.setup.certificate)?;
     let mut reader = BufReader::new(cert_file);
     for cert_result in rustls_pemfile::certs(&mut reader) {
         let cert = cert_result?;
-        let der_bytes = cert.as_ref();
-        if der_bytes.len() > 8 {
-            let head = &der_bytes[..4];
-            let tail = &der_bytes[der_bytes.len() - 4..];
-            println!(
-                "> Using root certificate (fingerprint): {:02X?}..****..{:02X?}",
-                head, tail
-            );
-        }
         roots.add(cert)?;
     }
     let tls_config = RustlsClientConfig::builder()
@@ -54,100 +76,112 @@ async fn connect_and_run(cfg: &Config) -> Result<(), Box<dyn Error + Send + Sync
     let mut endpoint = Endpoint::client("[::]:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
 
-    // --- 2. Connect ---
     let addr_str = format!("{}:{}", cfg.network.address, cfg.network.port);
     let remote_addr: SocketAddr = addr_str.to_socket_addrs()?.next().ok_or("Invalid address")?;
-
-    let token_to_log = {
-        let token = &cfg.setup.auth_token;
-        let len = token.chars().count();
-        if len > 4 {
-            format!(
-                "{}{}{}",
-                token.chars().next().unwrap(),
-                "*".repeat(len - 4),
-                token.chars().skip(len - 3).collect::<String>()
-            )
-        } else {
-            token.to_string()
-        }
-    };
-    println!("> Using auth token: {}", token_to_log);
 
     let connection = endpoint.connect(remote_addr, "localhost")?.await?;
     println!("+ Connection established with {}", connection.remote_address());
 
-    // --- 3. Authenticate ---
-    authenticate_with_server(&connection, &cfg.setup.auth_token).await?;
+    let (mut control_send, mut control_recv) = connection.open_bi().await?;
+    println!("+ Control stream opened for bidirectional communication.");
 
-    // --- 4. Handle the active connection (including keepalives) ---
-    handle_active_connection(connection).await
-}
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
+    let in_flight_pings: InFlightPings = Arc::new(Mutex::new(HashMap::new()));
+    let auth_state = Arc::new(Mutex::new(AuthState::Unauthenticated));
 
-async fn authenticate_with_server(
-    connection: &Connection,
-    token: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(token.as_bytes()).await?;
-    send.finish()?;
-    let response =
-        tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(1024)).await??;
-    if response == b"AUTH_SUCCESS" {
-        println!("+ Authentication successful");
-        Ok(())
-    } else {
-        Err("Authentication failed".into())
-    }
-}
-
-/// This function contains the keepalive loop. It runs until the connection is lost.
-async fn handle_active_connection(
-    connection: Connection,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut keepalive_interval =
-        tokio::time::interval(Duration::from_secs(keepalive::KEEPALIVE_INTERVAL_SECS));
-
-    loop {
-        tokio::select! {
-            _ = keepalive_interval.tick() => {
-                if let Err(e) = send_keepalive_ping(&connection).await {
-                    // Ping failed (timeout or other error), break the loop and signal disconnection.
-                    return Err(format!("Keepalive failed: {}", e).into());
-                }
-            },
-            // This branch detects if the connection was closed by the server or a fatal error occurred.
-            event = connection.read_datagram() => {
-                match event {
-                    Ok(_) => {}, // Ignore datagrams for now
-                    Err(ConnectionError::LocallyClosed) => return Err("Connection closed by client".into()),
-                    Err(e) => return Err(format!("Connection error: {}", e).into()),
-                }
+    tokio::spawn(async move {
+        while let Some(msg_bytes) = rx.recv().await {
+            if let Err(e) = control_send.write_all(&msg_bytes).await {
+                println!("! Client failed to send message: {}", e);
+                break;
             }
         }
-    }
-}
+    });
 
-/// Sends one keepalive ping and waits for a response, with a timeout.
-async fn send_keepalive_ping(
-    connection: &Connection,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let ping_operation = async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        send.write_all(keepalive::KEEPALIVE_HEADER.as_bytes())
-            .await?;
-        send.finish()?;
-        let response = recv.read_to_end(1024).await?;
-        if response == keepalive::KEEPALIVE_ACK_HEADER.as_bytes() {
-            Ok(())
-        } else {
-            Err("Invalid keepalive ACK".into())
+    let ping_tx = tx.clone();
+    let pings_to_track = in_flight_pings.clone();
+    let log_cfg = cfg.clone();
+    let pinger_handle: JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            time::sleep(Duration::from_secs(1)).await;
+            if let Some(ping_msg) = keepalive::build_client_ping().await {
+                let msg_id = ping_msg[1];
+                if log_cfg.setup.log_level == "debug" {
+                    println!("> Queueing keep-alive PING (id: {})", msg_id);
+                }
+                pings_to_track.lock().await.insert(msg_id, Instant::now());
+                if let Err(e) = ping_tx.send(ping_msg.to_vec()).await {
+                    println!("! Failed to queue PING: {}", e);
+                    break;
+                }
+            } else {
+                println!("! Failed to create PING: message ID pool is full.");
+            }
+        }
+    });
+
+    let pings_to_watch = in_flight_pings.clone();
+    let conn_for_timeout = connection.clone();
+    let watcher_handle: JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            time::sleep(Duration::from_millis(100)).await;
+            let mut timed_out = None;
+            let mut pings = pings_to_watch.lock().await;
+            for (msg_id, sent_at) in pings.iter() {
+                if sent_at.elapsed() > Duration::from_millis(500) {
+                    timed_out = Some(*msg_id);
+                    break;
+                }
+            }
+            if let Some(msg_id) = timed_out {
+                println!("! PONG for msg_id {} not received in 500ms. Closing connection.", msg_id);
+                conn_for_timeout.close(1u32.into(), b"PONG timeout");
+                pings.clear();
+                break;
+            }
+        }
+    });
+
+    let auth_token = cfg.setup.auth_token.as_bytes();
+    let auth_header = WsmHeader::new(
+        0x03,
+        msg_id::create_new_msg_id().await.unwrap_or(0),
+        PayloadType::Raw,
+        auth_token.len() as u32,
+    );
+    let mut auth_request = auth_header.to_bytes().to_vec();
+    auth_request.extend_from_slice(auth_token);
+    println!("> Sending authentication request...");
+    tx.send(auth_request).await?;
+
+    println!("> Client is now listening for responses...");
+    let mut header_buf = [0u8; 8];
+    let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
+        match control_recv.read_exact(&mut header_buf).await {
+            Ok(()) => {
+                let header = WsmHeader::from_bytes(&header_buf);
+                if let ControlFlow::Break(_) = endpoints::dispatch_client(
+                    &header,
+                    &mut control_recv,
+                    in_flight_pings.clone(),
+                    auth_state.clone(),
+                    stop_reconnecting.clone(),
+                    cfg,
+                )
+                .await
+                {
+                    println!("! Dispatcher requested termination (auth failure).");
+                    break Err("Authentication failed".into());
+                }
+            }
+            Err(e) => {
+                println!("! Client connection lost: {}. Triggering reconnect...", e);
+                break Err(Box::new(e));
+            }
         }
     };
 
-    match tokio::time::timeout(Duration::from_millis(2500), ping_operation).await {
-        Ok(Ok(_)) => Ok(()), // Ping-pong successful
-        Ok(Err(e)) => Err(e), // Network or logic error during ping
-        Err(_) => Err("Keepalive response timeout".into()), // Timeout waiting for pong
-    }
+    pinger_handle.abort();
+    watcher_handle.abort();
+    loop_result
 }

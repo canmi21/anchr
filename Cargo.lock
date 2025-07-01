@@ -30,9 +30,11 @@ dependencies = [
 name = "anchr"
 version = "0.13.2"
 dependencies = [
+ "lazy_static",
  "openssl",
  "pnet",
  "quinn",
+ "rand",
  "rustls",
  "rustls-pemfile",
  "serde",

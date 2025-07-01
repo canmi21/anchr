@@ -1,36 +1,95 @@
 /* src/quic/auth.rs */
 
-use quinn::{Connection, RecvStream, SendStream};
-use tokio::time::{timeout, Duration};
+use crate::setup::config::Config;
+use crate::wsm::endpoints::AuthState;
+use crate::wsm::header::{PayloadType, WsmHeader, RESERVED_FINAL_FLAG, OPCODE_ERROR_FATAL};
+use quinn::RecvStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
-pub async fn authenticate(
-    connection: &Connection,
-    expected_token: &str,
-) -> Result<(SendStream, RecvStream), ()> {
-    let (mut send, mut recv) = match connection.accept_bi().await {
-        Ok(stream) => stream,
-        Err(_) => return Err(()),
-    };
-
-    let token_data = match timeout(Duration::from_secs(10), recv.read_to_end(1024)).await {
-        Ok(Ok(data)) => data,
-        _ => return Err(()),
-    };
-
-    let received_token = match String::from_utf8(token_data) {
-        Ok(token) => token,
-        Err(_) => return Err(()),
-    };
-
-    if received_token != expected_token {
-        let _ = send.write_all(b"AUTH_FAILED").await;
-        let _ = send.finish();
-        return Err(());
+pub async fn handle_auth_request(
+    header: &WsmHeader,
+    recv: &mut RecvStream,
+    tx: mpsc::Sender<Vec<u8>>,
+    auth_state: Arc<Mutex<AuthState>>,
+    cfg: &Config,
+) -> bool {
+    let mut token_buf = vec![0; header.payload_len as usize];
+    if recv.read_exact(&mut token_buf).await.is_err() {
+        return false;
     }
 
-    if send.write_all(b"AUTH_SUCCESS").await.is_err() || send.finish().is_err() {
-        return Err(());
-    }
+    let received_token = String::from_utf8_lossy(&token_buf);
+    let expected_token = &cfg.setup.auth_token;
 
-    Ok((send, recv))
+    if received_token == *expected_token {
+        println!("  -> WSM: Client authenticated successfully.");
+        let mut state = auth_state.lock().await;
+        *state = AuthState::Authenticated;
+        let response_header = WsmHeader::with_reserved(
+            0x00,
+            header.message_id,
+            PayloadType::Raw,
+            0,
+            RESERVED_FINAL_FLAG,
+        );
+        let _ = tx.send(response_header.to_bytes().to_vec()).await;
+        true
+    } else {
+        println!("  -> WSM: Client authentication failed (token mismatch).");
+        let reason = "Invalid authentication token".as_bytes();
+        let response_header = WsmHeader::with_reserved(
+            0x00,
+            header.message_id,
+            PayloadType::Raw,
+            reason.len() as u32,
+            RESERVED_FINAL_FLAG,
+        );
+        let mut response = response_header.to_bytes().to_vec();
+        response.extend_from_slice(reason);
+        let _ = tx.send(response).await;
+        false
+    }
+}
+
+pub async fn handle_auth_response(
+    header: &WsmHeader,
+    recv: &mut RecvStream,
+    auth_state: Arc<Mutex<AuthState>>,
+    stop_reconnecting: Arc<AtomicBool>,
+) -> bool {
+    if header.is_final() {
+        if header.payload_len == 0 {
+            println!("  -> WSM: Authentication successful.");
+            let mut state = auth_state.lock().await;
+            *state = AuthState::Authenticated;
+            return true;
+        } else {
+            let mut reason_buf = vec![0; header.payload_len as usize];
+            if recv.read_exact(&mut reason_buf).await.is_ok() {
+                let reason = String::from_utf8_lossy(&reason_buf);
+                println!("! WSM: Authentication failed. Reason: {}", reason);
+            } else {
+                println!("! WSM: Authentication failed. Could not read reason.");
+            }
+            stop_reconnecting.store(true, Ordering::SeqCst);
+            return false;
+        }
+    }
+    true
+}
+
+pub async fn send_unauthorized_response(msg_id: u8, tx: mpsc::Sender<Vec<u8>>) {
+    let reason = "Unauthenticated".as_bytes();
+    let header = WsmHeader::with_reserved(
+        OPCODE_ERROR_FATAL,
+        msg_id,
+        PayloadType::Raw,
+        reason.len() as u32,
+        RESERVED_FINAL_FLAG,
+    );
+    let mut response = header.to_bytes().to_vec();
+    response.extend_from_slice(reason);
+    let _ = tx.send(response).await;
 }

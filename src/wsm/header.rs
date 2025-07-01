@@ -1,65 +1,39 @@
 /* src/wsm/header.rs */
 
-/**
- * @file header.rs
- * @brief WSM Rev3 protocol 8-byte header definition and builder
- * @copyright Copyright (C) 2025 Canmi, all rights reserved.
- */
-
 use std::convert::TryFrom;
 
-// Operation code for identifying the protocol message type.
+// Final message flag for reserved field
+pub const RESERVED_FINAL_FLAG: u8 = 0xFF;
+// Opcode for fatal, unrecoverable errors
+pub const OPCODE_ERROR_FATAL: u8 = 0xFF;
+
+
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum OpCode {
-    Ping = 0x01,
-    Auth = 0x02,
-    Data = 0x03,
-    Echo = 0x04,
-    /* 0x01 - 0x10 are reserved for wsm std, other can be used by custom endpoints */
-    Custom = 0xFF,
-}
-
-impl TryFrom<&str> for OpCode {
-    type Error = ();
-
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        match name.to_lowercase().as_str() {
-            "ping" => Ok(OpCode::Ping),
-            "auth" => Ok(OpCode::Auth),
-            "data" => Ok(OpCode::Data),
-            "echo" => Ok(OpCode::Echo),
-            "custom" => Ok(OpCode::Custom),
-            _ => Err(()),
-        }
-    }
-}
-
-// Type of the payload following the header
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadType {
     Json = 0x01,
     Bincode = 0x02,
     Raw = 0x03,
+    Base64 = 0x04,
+    MsgPack = 0x05,
     Custom = 0xFF,
 }
 
-impl TryFrom<&str> for PayloadType {
+impl TryFrom<u8> for PayloadType {
     type Error = ();
-
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        match name.to_lowercase().as_str() {
-            "json" => Ok(PayloadType::Json),
-            "bincode" => Ok(PayloadType::Bincode),
-            "raw" => Ok(PayloadType::Raw),
-            "custom" => Ok(PayloadType::Custom),
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            x if x == PayloadType::Json as u8 => Ok(PayloadType::Json),
+            x if x == PayloadType::Bincode as u8 => Ok(PayloadType::Bincode),
+            x if x == PayloadType::Raw as u8 => Ok(PayloadType::Raw),
+            x if x == PayloadType::Base64 as u8 => Ok(PayloadType::Base64),
+            x if x == PayloadType::MsgPack as u8 => Ok(PayloadType::MsgPack),
+            x if x == PayloadType::Custom as u8 => Ok(PayloadType::Custom),
             _ => Err(()),
         }
     }
 }
 
-// Represents a full 8-byte header
 #[derive(Debug, Clone, Copy)]
 pub struct WsmHeader {
     pub opcode: u8,
@@ -70,14 +44,34 @@ pub struct WsmHeader {
 }
 
 impl WsmHeader {
-    pub fn new(opcode: OpCode, message_id: u8, payload_type: PayloadType, payload_len: u32) -> Self {
+    pub fn new(opcode: u8, message_id: u8, payload_type: PayloadType, payload_len: u32) -> Self {
         WsmHeader {
-            opcode: opcode as u8,
+            opcode,
             message_id,
             payload_type: payload_type as u8,
             reserved: 0,
             payload_len,
         }
+    }
+
+    pub fn with_reserved(
+        opcode: u8,
+        message_id: u8,
+        payload_type: PayloadType,
+        payload_len: u32,
+        reserved: u8,
+    ) -> Self {
+        WsmHeader {
+            opcode,
+            message_id,
+            payload_type: payload_type as u8,
+            reserved,
+            payload_len,
+        }
+    }
+
+    pub fn is_final(&self) -> bool {
+        self.reserved == RESERVED_FINAL_FLAG
     }
 
     pub fn to_bytes(&self) -> [u8; 8] {
@@ -90,7 +84,7 @@ impl WsmHeader {
         buf
     }
 
-    pub fn from_bytes(buf: [u8; 8]) -> Self {
+    pub fn from_bytes(buf: &[u8; 8]) -> Self {
         let payload_len = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
         WsmHeader {
             opcode: buf[0],

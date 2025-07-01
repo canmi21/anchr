@@ -1,8 +1,7 @@
 /* src/quic/bootstrap.rs */
 
-use crate::setup::config::Config;
-use crate::quic::{auth, service};
-use quinn::{ Endpoint, ServerConfig, TransportConfig};
+use crate::{quic::service, setup::config::Config};
+use quinn::{Endpoint, ServerConfig, TransportConfig};
 use std::{fs::File, io::BufReader, net::SocketAddr, sync::Arc, time::Duration};
 
 pub async fn start_quic_server(cfg: Config) {
@@ -32,42 +31,16 @@ pub async fn start_quic_server(cfg: Config) {
     let endpoint = Endpoint::server(server_config, addr).unwrap();
     println!("> QUIC server running on {}", addr);
 
-    let token_to_log = mask_token(&cfg.setup.auth_token);
-    println!("> Expected auth token: {}", token_to_log);
-
     while let Some(connecting) = endpoint.accept().await {
-        let expected_token = cfg.setup.auth_token.clone();
+        let server_cfg = cfg.clone();
         tokio::spawn(async move {
             match connecting.await {
                 Ok(conn) => {
                     println!("+ New connection from {}", conn.remote_address());
-                    match auth::authenticate(&conn, &expected_token).await {
-                        Ok(_) => {
-                            println!("+ Auth success: {}", conn.remote_address());
-                            service::handle_authenticated_client(conn).await;
-                        }
-                        Err(_) => {
-                            println!("! Auth failed: {}", conn.remote_address());
-                            conn.close(1u32.into(), b"unauthorized");
-                        }
-                    }
+                    service::handle_connection(conn, server_cfg).await;
                 }
                 Err(e) => println!("! Connection failed: {}", e),
             }
         });
-    }
-}
-
-fn mask_token(token: &str) -> String {
-    let len = token.chars().count();
-    if len > 4 {
-        format!(
-            "{}{}{}",
-            token.chars().next().unwrap(),
-            "*".repeat(len - 4),
-            token.chars().skip(len - 3).collect::<String>()
-        )
-    } else {
-        token.to_string()
     }
 }
