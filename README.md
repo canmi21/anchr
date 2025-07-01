@@ -2,7 +2,7 @@
 
 > **Note**: This project is currently under active development.
 
-`anchr` is a low-level Linux daemon exposing bound disk partitions via a QUIC-based abstraction layer, designed for high-performance communication with the `fs` service. It is designed for secure internal usage and will eventually form the foundational layer for encrypted file access across a private infrastructure.
+`anchr` is a low-level Linux daemon exposing bound disk partitions via a QUIC-based abstraction layer, designed for high-performance communication with the `rfs` service. It is designed for secure internal usage and will eventually form the foundational layer for encrypted file access across a private infrastructure.
 
 ## ⚠️ Status: Experimental
 
