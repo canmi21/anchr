@@ -2,6 +2,7 @@
 
 mod setup;
 mod quic;
+mod wsm;
 
 use setup::gen_conf::generate_default_config;
 use setup::config::Config;

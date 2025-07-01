@@ -11,7 +11,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::time::Duration;
 
-/// Main entry point for the client, now with an infinite reconnection loop.
 pub async fn start_quic_client(cfg: Config) {
     loop {
         println!("> Attempting to connect to the server...");
@@ -58,7 +57,7 @@ async fn connect_and_run(cfg: &Config) -> Result<(), Box<dyn Error + Send + Sync
     // --- 2. Connect ---
     let addr_str = format!("{}:{}", cfg.network.address, cfg.network.port);
     let remote_addr: SocketAddr = addr_str.to_socket_addrs()?.next().ok_or("Invalid address")?;
-    
+
     let token_to_log = {
         let token = &cfg.setup.auth_token;
         let len = token.chars().count();
@@ -119,11 +118,11 @@ async fn handle_active_connection(
             },
             // This branch detects if the connection was closed by the server or a fatal error occurred.
             event = connection.read_datagram() => {
-                 match event {
+                match event {
                     Ok(_) => {}, // Ignore datagrams for now
                     Err(ConnectionError::LocallyClosed) => return Err("Connection closed by client".into()),
                     Err(e) => return Err(format!("Connection error: {}", e).into()),
-                 }
+                }
             }
         }
     }
