@@ -1,11 +1,11 @@
 /* src/setup/gen_conf.rs */
 
+use super::cert::generate_certificate;
 use pnet::datalink;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use uuid::Uuid;
-use super::cert::generate_certificate;
 
 // Scans for available IPv4 addresses and prompts the user to select one.
 fn select_ip_address() -> String {
@@ -80,12 +80,20 @@ mode = "server"
 certificate = "{}"
 private_key = "{}"
 auth_token = "{}"
-log_level = "debug"
+log_level = "info"
 
 [network]
 listen = "0.0.0.0"
 address = "{}"
 port = 33321
+
+[[rfs]]
+dev_name = "ipel_disk_1"
+bind_path = "/path/to/your/volume/folder1"
+
+[[rfs]]
+dev_name = "ipel_disk_2"
+bind_path = "/path/to/your/volume/folder2"
 "#,
         cert_path, key_path, uuid, selected_ip
     );

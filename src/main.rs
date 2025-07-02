@@ -1,6 +1,6 @@
 /* src/main.rs */
 
-mod cli; // Add this line
+mod cli;
 mod console;
 mod quic;
 mod setup;
@@ -10,6 +10,7 @@ use crate::console::cli::run_tui_client;
 use setup::config::Config;
 use setup::gen_conf::generate_default_config;
 use std::env;
+use setup::check::validate_server_config;
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +31,12 @@ async fn main() {
         let config = Config::from_file(config_path);
 
         if config.setup.mode == "server" {
+            // Perform validation before starting the server
+            if let Err(e) = validate_server_config(&config) {
+                eprintln!("\n! {}", e);
+                eprintln!("! Server startup aborted due to configuration errors.");
+                std::process::exit(1);
+            }
             quic::bootstrap::start_quic_server(config).await;
         } else if config.setup.mode == "client" {
             if let Err(e) = run_tui_client(config).await {

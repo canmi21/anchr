@@ -64,7 +64,7 @@ pub async fn run_network_tasks(
                 let first_fail = first_failure_time.get_or_insert(now);
                 if now.duration_since(*first_fail) > Duration::from_secs(30) {
                     // This is now a backup clear; the primary clear is on successful auth.
-                    msg_id::drain_msg_id_pool().await;
+                    msg_id::clear_msg_id_pool().await; // MODIFIED
                     first_failure_time = None;
                 }
                 time::sleep(Duration::from_secs(3)).await;
@@ -150,13 +150,18 @@ async fn connect_and_run(
                 stop_reconnecting.clone(),
                 cfg,
                 stats.clone(),
-            ).await {
+            )
+            .await
+            {
                 error!("Dispatcher requested termination (auth failure).");
                 return Err("Authentication failed".into());
             }
         }
         Err(e) => {
-            warn!("Client connection lost during auth: {}. Triggering reconnect...", e);
+            warn!(
+                "Client connection lost during auth: {}. Triggering reconnect...",
+                e
+            );
             return Err(Box::new(e));
         }
     };
@@ -168,7 +173,7 @@ async fn connect_and_run(
 
     // --- Post-Authentication Phase ---
     info!("Clearing message pool for new session...");
-    msg_id::drain_msg_id_pool().await;
+    msg_id::clear_msg_id_pool().await;
 
     info!("Spawning keep-alive tasks...");
     let ping_tx = tx.clone();
@@ -207,14 +212,17 @@ async fn connect_and_run(
                 }
             }
             if let Some(msg_id) = timed_out {
-                warn!("PONG for msg_id {} not received in 500ms. Closing connection.", msg_id);
+                warn!(
+                    "PONG for msg_id {} not received in 500ms. Closing connection.",
+                    msg_id
+                );
                 conn_for_timeout.close(1u32.into(), b"PONG timeout");
                 pings.clear();
                 break;
             }
         }
     });
-    
+
     info!("Client is now in main loop, handling PONGs...");
     let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
         match control_recv.read_exact(&mut header_buf).await {
@@ -232,7 +240,9 @@ async fn connect_and_run(
                     stop_reconnecting.clone(),
                     cfg,
                     stats.clone(),
-                ).await {
+                )
+                .await
+                {
                     error!("Dispatcher requested termination post-auth.");
                     break Err("Connection terminated by dispatcher".into());
                 }

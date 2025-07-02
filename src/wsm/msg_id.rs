@@ -1,6 +1,7 @@
 /* src/wsm/msg_id.rs */
 
 use lazy_static::lazy_static;
+use rand; // Make sure rand is in your Cargo.toml
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
@@ -10,7 +11,8 @@ lazy_static! {
 
 pub async fn create_new_msg_id() -> Option<u8> {
     let mut pool = MSG_ID_POOL.lock().await;
-    if pool.len() == (u8::MAX as usize + 1) {
+    // u8::MAX is 255. The length can go from 0 to 256.
+    if pool.len() >= (u8::MAX as usize) + 1 {
         return None;
     }
     loop {
@@ -26,15 +28,16 @@ pub async fn remove_msg_id(id: u8) -> bool {
     pool.remove(&id)
 }
 
-/// Returns the current number of message IDs in the pool.
-pub async fn get_pool_size() -> usize {
-    MSG_ID_POOL.lock().await.len()
+pub async fn clear_msg_id_pool() {
+    let mut pool = MSG_ID_POOL.lock().await;
+    if !pool.is_empty() {
+        pool.clear();
+        // Use log instead of println to integrate with the TUI logger
+        log::info!("- Cleared message ID pool due to new session or extended disconnection.");
+    }
 }
 
-pub async fn drain_msg_id_pool() -> Vec<u8> {
-    let mut pool = MSG_ID_POOL.lock().await;
-    if pool.is_empty() {
-        return Vec::new();
-    }
-    pool.drain().collect()
+/// Returns the number of message IDs currently in use.
+pub async fn get_pool_size() -> usize {
+    MSG_ID_POOL.lock().await.len()
 }
