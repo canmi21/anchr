@@ -1,5 +1,6 @@
 /* src/wsm/endpoints.rs */
 
+use crate::console::app::Stats;
 use crate::quic::{auth, keepalive};
 use crate::setup::config::Config;
 use crate::wsm::header::{WsmHeader, OPCODE_ERROR_FATAL};
@@ -19,7 +20,6 @@ pub enum AuthState {
 
 pub type InFlightPings = Arc<Mutex<HashMap<u8, Instant>>>;
 
-// (SERVER) Dispatches incoming messages from a client.
 pub async fn dispatch_server(
     header: &WsmHeader,
     recv: &mut RecvStream,
@@ -29,7 +29,7 @@ pub async fn dispatch_server(
 ) -> ControlFlow<()> {
     let state = *auth_state.lock().await;
     if state == AuthState::Unauthenticated && !matches!(header.opcode, 0x01 | 0x03) {
-        println!("! WSM-Server: Denying access to opcode {:#04X} for unauthenticated client.", header.opcode);
+        log::warn!("! WSM-Server: Denying access to opcode {:#04X} for unauthenticated client.", header.opcode);
         auth::send_unauthorized_response(header.message_id, tx).await;
         return ControlFlow::Break(());
     }
@@ -44,21 +44,24 @@ pub async fn dispatch_server(
             }
         }
         _ => {
-            println!("! WSM-Server: Received unknown opcode: {:#04X}", header.opcode);
+            log::warn!("! WSM-Server: Received unknown opcode: {:#04X}", header.opcode);
         }
     }
     ControlFlow::Continue(())
 }
 
-// (CLIENT) Dispatches incoming messages from the server.
 pub async fn dispatch_client(
     header: &WsmHeader,
     recv: &mut RecvStream,
     in_flight_pings: InFlightPings,
     auth_state: Arc<Mutex<AuthState>>,
     stop_reconnecting: Arc<AtomicBool>,
-    cfg: &Config, // FIX: Add the missing cfg parameter
+    cfg: &Config,
+    stats: Stats,
 ) -> ControlFlow<()> {
+    stats
+        .rx_bytes
+        .fetch_add(header.payload_len as u64, Ordering::Relaxed);
     match header.opcode {
         0x00 => {
             if !auth::handle_auth_response(header, recv, auth_state, stop_reconnecting).await {
@@ -66,22 +69,21 @@ pub async fn dispatch_client(
             }
         }
         0x02 => {
-            // Pass the cfg down to the handler
             keepalive::handle_pong_response(header.message_id, in_flight_pings, cfg).await;
         }
         OPCODE_ERROR_FATAL => {
-            println!("! WSM-Client: Received fatal error from server.");
+            log::error!("! WSM-Client: Received fatal error from server.");
             if header.payload_len > 0 {
                 let mut reason_buf = vec![0; header.payload_len as usize];
                 if recv.read_exact(&mut reason_buf).await.is_ok() {
-                    println!("! Server reason: {}", String::from_utf8_lossy(&reason_buf));
+                    log::error!("! Server reason: {}", String::from_utf8_lossy(&reason_buf));
                 }
             }
             stop_reconnecting.store(true, Ordering::SeqCst);
             return ControlFlow::Break(());
         }
         _ => {
-            println!("! WSM-Client: Received unknown opcode: {:#04X}", header.opcode);
+            log::warn!("! WSM-Client: Received unknown opcode: {:#04X}", header.opcode);
         }
     }
     ControlFlow::Continue(())

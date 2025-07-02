@@ -4,6 +4,7 @@ use crate::{
     console::{app::App, ui},
     quic::client::run_network_tasks,
     setup::config::Config,
+    wsm::msg_id,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -13,7 +14,9 @@ use crossterm::{
 use log::LevelFilter;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::time;
 use tui_logger::{init_logger, set_default_level};
 
 pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
@@ -27,12 +30,25 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    // FIX: Reassign the returned state back to the app fields.
+    // FIX: Reassign the returned state back to the app fields to solve the move error.
     app.info_log_state = app.info_log_state.set_default_display_level(LevelFilter::Info);
     app.debug_log_state = app.debug_log_state.set_default_display_level(LevelFilter::Debug);
 
+    let stats_for_network = app.stats.clone();
+    let stats_for_updater = app.stats.clone();
+
     tokio::spawn(async move {
-        run_network_tasks(cfg).await;
+        loop {
+            let count = msg_id::get_pool_size().await;
+            stats_for_updater
+                .pool_count
+                .store(count, Ordering::Relaxed);
+            time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    tokio::spawn(async move {
+        run_network_tasks(cfg, stats_for_network).await;
     });
 
     while !app.should_quit {
@@ -45,7 +61,6 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
                         app.should_quit = true;
                     }
                     KeyCode::Enter => {
-                        // TODO: Handle input submission
                         app.input.clear();
                     }
                     KeyCode::Char(c) => {

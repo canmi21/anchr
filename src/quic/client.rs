@@ -1,5 +1,6 @@
 /* src/quic/client.rs */
 
+use crate::console::app::Stats;
 use crate::quic::keepalive;
 use crate::setup::config::Config;
 use crate::wsm::endpoints::{self, AuthState, InFlightPings};
@@ -21,7 +22,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-pub async fn run_network_tasks(cfg: Config) {
+// FIX: Update function signature to accept the shared Stats object
+pub async fn run_network_tasks(cfg: Config, stats: Stats) {
     info!("Network task starting...");
     let mut first_failure_time: Option<Instant> = None;
     let stop_reconnecting = Arc::new(AtomicBool::new(false));
@@ -33,7 +35,8 @@ pub async fn run_network_tasks(cfg: Config) {
         }
 
         info!("Attempting to connect to the server...");
-        match connect_and_run(&cfg, stop_reconnecting.clone()).await {
+        // FIX: Pass the stats object down to the connection handler
+        match connect_and_run(&cfg, stop_reconnecting.clone(), stats.clone()).await {
             Ok(_) => {
                 info!("Connection closed gracefully. Exiting network task.");
                 break;
@@ -43,7 +46,6 @@ pub async fn run_network_tasks(cfg: Config) {
                     error!("Halting reconnection attempts due to fatal error: {}", e);
                     break;
                 }
-
                 warn!("Connection error: {}. Retrying in 3 seconds...", e);
                 let now = Instant::now();
                 let first_fail = first_failure_time.get_or_insert(now);
@@ -60,6 +62,7 @@ pub async fn run_network_tasks(cfg: Config) {
 async fn connect_and_run(
     cfg: &Config,
     stop_reconnecting: Arc<AtomicBool>,
+    stats: Stats, // FIX: Accept stats as a parameter
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut roots = RootCertStore::empty();
     let cert_file = File::open(&cfg.setup.certificate)?;
@@ -89,13 +92,18 @@ async fn connect_and_run(
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
     let in_flight_pings: InFlightPings = Arc::new(Mutex::new(HashMap::new()));
     let auth_state = Arc::new(Mutex::new(AuthState::Unauthenticated));
-
+    // FIX: Remove local stats object, use the one passed in.
+    
+    let stats_for_sender = stats.clone();
     tokio::spawn(async move {
         while let Some(msg_bytes) = rx.recv().await {
             if let Err(e) = control_send.write_all(&msg_bytes).await {
                 error!("Client failed to send message: {}", e);
                 break;
             }
+            stats_for_sender
+                .tx_bytes
+                .fetch_add(msg_bytes.len() as u64, Ordering::Relaxed);
         }
     });
 
@@ -160,7 +168,11 @@ async fn connect_and_run(
     let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
         match control_recv.read_exact(&mut header_buf).await {
             Ok(()) => {
+                stats.rx_bytes.fetch_add(8, Ordering::Relaxed);
                 let header = WsmHeader::from_bytes(&header_buf);
+                stats
+                    .last_msg_id
+                    .store(header.message_id, Ordering::Relaxed);
                 if let ControlFlow::Break(_) = endpoints::dispatch_client(
                     &header,
                     &mut control_recv,
@@ -168,6 +180,7 @@ async fn connect_and_run(
                     auth_state.clone(),
                     stop_reconnecting.clone(),
                     cfg,
+                    stats.clone(),
                 )
                 .await
                 {
