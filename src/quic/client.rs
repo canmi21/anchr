@@ -32,7 +32,6 @@ pub async fn run_network_tasks(
     let mut first_failure_time: Option<Instant> = None;
     let stop_reconnecting = Arc::new(AtomicBool::new(false));
 
-    // FIX: Wrap the receiver in an Arc<Mutex> to allow shared ownership across reconnect attempts.
     let rx_arc = Arc::new(Mutex::new(rx));
 
     loop {
@@ -64,7 +63,8 @@ pub async fn run_network_tasks(
                 let now = Instant::now();
                 let first_fail = first_failure_time.get_or_insert(now);
                 if now.duration_since(*first_fail) > Duration::from_secs(30) {
-                    msg_id::clear_msg_id_pool().await;
+                    // This is now a backup clear; the primary clear is on successful auth.
+                    msg_id::drain_msg_id_pool().await;
                     first_failure_time = None;
                 }
                 time::sleep(Duration::from_secs(3)).await;
@@ -78,7 +78,6 @@ async fn connect_and_run(
     stop_reconnecting: Arc<AtomicBool>,
     stats: Stats,
     tx: mpsc::Sender<Vec<u8>>,
-    // FIX: Accept the Arc<Mutex> wrapped receiver
     rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut roots = RootCertStore::empty();
@@ -110,9 +109,7 @@ async fn connect_and_run(
     let auth_state = Arc::new(Mutex::new(AuthState::Unauthenticated));
 
     let stats_for_sender = stats.clone();
-    // The spawned task now owns a clone of the Arc, which is 'static
     tokio::spawn(async move {
-        // The loop locks the mutex to receive a message
         while let Some(msg_bytes) = rx.lock().await.recv().await {
             if let Err(e) = control_send.write_all(&msg_bytes).await {
                 error!("Client failed to send message: {}", e);
@@ -124,6 +121,56 @@ async fn connect_and_run(
         }
     });
 
+    // --- Authentication Phase ---
+    let auth_token = cfg.setup.auth_token.as_bytes();
+    let auth_header = WsmHeader::new(
+        0x03,
+        msg_id::create_new_msg_id().await.unwrap_or(0),
+        PayloadType::Raw,
+        auth_token.len() as u32,
+    );
+    let mut auth_request = auth_header.to_bytes().to_vec();
+    auth_request.extend_from_slice(auth_token);
+    info!("Sending authentication request...");
+    tx.send(auth_request).await?;
+
+    let mut header_buf = [0u8; 8];
+    match control_recv.read_exact(&mut header_buf).await {
+        Ok(()) => {
+            stats.rx_bytes.fetch_add(8, Ordering::Relaxed);
+            let header = WsmHeader::from_bytes(&header_buf);
+            stats
+                .last_msg_id
+                .store(header.message_id, Ordering::Relaxed);
+            if let ControlFlow::Break(_) = endpoints::dispatch_client(
+                &header,
+                &mut control_recv,
+                in_flight_pings.clone(),
+                auth_state.clone(),
+                stop_reconnecting.clone(),
+                cfg,
+                stats.clone(),
+            ).await {
+                error!("Dispatcher requested termination (auth failure).");
+                return Err("Authentication failed".into());
+            }
+        }
+        Err(e) => {
+            warn!("Client connection lost during auth: {}. Triggering reconnect...", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    // Check auth state after handling the response
+    if *auth_state.lock().await != AuthState::Authenticated {
+        return Err("Authentication was not successful.".into());
+    }
+
+    // --- Post-Authentication Phase ---
+    info!("Clearing message pool for new session...");
+    msg_id::drain_msg_id_pool().await;
+
+    info!("Spawning keep-alive tasks...");
     let ping_tx = tx.clone();
     let pings_to_track = in_flight_pings.clone();
     let log_cfg = cfg.clone();
@@ -167,21 +214,8 @@ async fn connect_and_run(
             }
         }
     });
-
-    let auth_token = cfg.setup.auth_token.as_bytes();
-    let auth_header = WsmHeader::new(
-        0x03,
-        msg_id::create_new_msg_id().await.unwrap_or(0),
-        PayloadType::Raw,
-        auth_token.len() as u32,
-    );
-    let mut auth_request = auth_header.to_bytes().to_vec();
-    auth_request.extend_from_slice(auth_token);
-    info!("Sending authentication request...");
-    tx.send(auth_request).await?;
-
-    info!("Client is now listening for responses...");
-    let mut header_buf = [0u8; 8];
+    
+    info!("Client is now in main loop, handling PONGs...");
     let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
         match control_recv.read_exact(&mut header_buf).await {
             Ok(()) => {
@@ -198,11 +232,9 @@ async fn connect_and_run(
                     stop_reconnecting.clone(),
                     cfg,
                     stats.clone(),
-                )
-                .await
-                {
-                    error!("Dispatcher requested termination (auth failure).");
-                    break Err("Authentication failed".into());
+                ).await {
+                    error!("Dispatcher requested termination post-auth.");
+                    break Err("Connection terminated by dispatcher".into());
                 }
             }
             Err(e) => {

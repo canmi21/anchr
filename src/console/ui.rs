@@ -27,7 +27,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         .output_separator(' ')
         .output_file(false)
         .state(&app.info_log_state)
-        // FIX: Add styles back
         .style_error(Style::default().red())
         .style_warn(Style::default().yellow())
         .style_info(Style::default().cyan());
@@ -39,7 +38,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         .output_separator(' ')
         .output_file(false)
         .state(&app.debug_log_state)
-        // FIX: Add styles back
         .style_debug(Style::default().green())
         .style_trace(Style::default().magenta());
     f.render_widget(debug_log_output, main_chunks[1]);

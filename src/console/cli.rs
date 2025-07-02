@@ -19,11 +19,12 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time;
-use tui_logger::{init_logger, set_default_level};
+use tui_logger::{init_logger, set_default_level, set_level_for_target}; // Import added
 
 pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
     init_logger(LevelFilter::Trace).unwrap();
     set_default_level(LevelFilter::Trace);
+    set_level_for_target("quinn::connection", LevelFilter::Info);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -38,7 +39,6 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
     let stats_for_network = app.stats.clone();
     let stats_for_updater = app.stats.clone();
 
-    // Create the channel in the main UI task
     let (tx, rx) = mpsc::channel::<Vec<u8>>(32);
 
     tokio::spawn(async move {
@@ -51,7 +51,6 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
         }
     });
 
-    // Pass the channel sender and receiver to the network task
     let network_tx = tx.clone();
     tokio::spawn(async move {
         run_network_tasks(cfg, stats_for_network, network_tx, rx).await;
@@ -71,7 +70,6 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
                         let input_to_process = app.input.clone();
                         app.input.clear();
 
-                        // Spawn a task to handle the command dispatch
                         tokio::spawn(async move {
                             command_cli::dispatch_command(&input_to_process, command_tx).await;
                         });

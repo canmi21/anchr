@@ -1,5 +1,6 @@
 /* src/cli/mod.rs */
 
+mod drop;
 mod ping;
 
 use log::info;
@@ -14,6 +15,9 @@ pub async fn dispatch_command(input: &str, tx: mpsc::Sender<Vec<u8>>) {
         match command.to_lowercase().as_str() {
             "ping" => {
                 ping::handle_command(args, tx).await;
+            }
+            "drop" => {
+                drop::handle_command(args).await;
             }
             _ => {
                 info!("Unknown command: {}", command);

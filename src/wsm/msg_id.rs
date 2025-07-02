@@ -26,15 +26,15 @@ pub async fn remove_msg_id(id: u8) -> bool {
     pool.remove(&id)
 }
 
-pub async fn clear_msg_id_pool() {
-    let mut pool = MSG_ID_POOL.lock().await;
-    if !pool.is_empty() {
-        pool.clear();
-        log::info!("- Cleared message ID pool due to extended disconnection.");
-    }
-}
-
 /// Returns the current number of message IDs in the pool.
 pub async fn get_pool_size() -> usize {
     MSG_ID_POOL.lock().await.len()
+}
+
+pub async fn drain_msg_id_pool() -> Vec<u8> {
+    let mut pool = MSG_ID_POOL.lock().await;
+    if pool.is_empty() {
+        return Vec::new();
+    }
+    pool.drain().collect()
 }
