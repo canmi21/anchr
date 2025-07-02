@@ -22,11 +22,18 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-// FIX: Update function signature to accept the shared Stats object
-pub async fn run_network_tasks(cfg: Config, stats: Stats) {
+pub async fn run_network_tasks(
+    cfg: Config,
+    stats: Stats,
+    tx: mpsc::Sender<Vec<u8>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+) {
     info!("Network task starting...");
     let mut first_failure_time: Option<Instant> = None;
     let stop_reconnecting = Arc::new(AtomicBool::new(false));
+
+    // FIX: Wrap the receiver in an Arc<Mutex> to allow shared ownership across reconnect attempts.
+    let rx_arc = Arc::new(Mutex::new(rx));
 
     loop {
         if stop_reconnecting.load(Ordering::SeqCst) {
@@ -35,8 +42,15 @@ pub async fn run_network_tasks(cfg: Config, stats: Stats) {
         }
 
         info!("Attempting to connect to the server...");
-        // FIX: Pass the stats object down to the connection handler
-        match connect_and_run(&cfg, stop_reconnecting.clone(), stats.clone()).await {
+        match connect_and_run(
+            &cfg,
+            stop_reconnecting.clone(),
+            stats.clone(),
+            tx.clone(),
+            Arc::clone(&rx_arc),
+        )
+        .await
+        {
             Ok(_) => {
                 info!("Connection closed gracefully. Exiting network task.");
                 break;
@@ -62,7 +76,10 @@ pub async fn run_network_tasks(cfg: Config, stats: Stats) {
 async fn connect_and_run(
     cfg: &Config,
     stop_reconnecting: Arc<AtomicBool>,
-    stats: Stats, // FIX: Accept stats as a parameter
+    stats: Stats,
+    tx: mpsc::Sender<Vec<u8>>,
+    // FIX: Accept the Arc<Mutex> wrapped receiver
+    rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut roots = RootCertStore::empty();
     let cert_file = File::open(&cfg.setup.certificate)?;
@@ -89,14 +106,14 @@ async fn connect_and_run(
     let (mut control_send, mut control_recv) = connection.open_bi().await?;
     info!("Control stream opened for bidirectional communication.");
 
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
     let in_flight_pings: InFlightPings = Arc::new(Mutex::new(HashMap::new()));
     let auth_state = Arc::new(Mutex::new(AuthState::Unauthenticated));
-    // FIX: Remove local stats object, use the one passed in.
-    
+
     let stats_for_sender = stats.clone();
+    // The spawned task now owns a clone of the Arc, which is 'static
     tokio::spawn(async move {
-        while let Some(msg_bytes) = rx.recv().await {
+        // The loop locks the mutex to receive a message
+        while let Some(msg_bytes) = rx.lock().await.recv().await {
             if let Err(e) = control_send.write_all(&msg_bytes).await {
                 error!("Client failed to send message: {}", e);
                 break;

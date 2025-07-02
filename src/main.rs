@@ -1,5 +1,6 @@
 /* src/main.rs */
 
+mod cli; // Add this line
 mod console;
 mod quic;
 mod setup;
@@ -27,12 +28,11 @@ async fn main() {
     if args.len() == 3 && args[1] == "-c" {
         let config_path = &args[2];
         let config = Config::from_file(config_path);
+
         if config.setup.mode == "server" {
             quic::bootstrap::start_quic_server(config).await;
         } else if config.setup.mode == "client" {
-            // Run the new TUI client instead of the old one.
             if let Err(e) = run_tui_client(config).await {
-                // Print to stderr to avoid interfering with TUI cleanup.
                 eprintln!("\nApplication Error: {}\n", e);
             }
         }

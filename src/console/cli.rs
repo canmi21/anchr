@@ -1,6 +1,7 @@
 /* src/console/cli.rs */
 
 use crate::{
+    cli as command_cli,
     console::{app::App, ui},
     quic::client::run_network_tasks,
     setup::config::Config,
@@ -16,6 +17,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time;
 use tui_logger::{init_logger, set_default_level};
 
@@ -30,12 +32,14 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    // FIX: Reassign the returned state back to the app fields to solve the move error.
     app.info_log_state = app.info_log_state.set_default_display_level(LevelFilter::Info);
     app.debug_log_state = app.debug_log_state.set_default_display_level(LevelFilter::Debug);
 
     let stats_for_network = app.stats.clone();
     let stats_for_updater = app.stats.clone();
+
+    // Create the channel in the main UI task
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(32);
 
     tokio::spawn(async move {
         loop {
@@ -47,8 +51,10 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
         }
     });
 
+    // Pass the channel sender and receiver to the network task
+    let network_tx = tx.clone();
     tokio::spawn(async move {
-        run_network_tasks(cfg, stats_for_network).await;
+        run_network_tasks(cfg, stats_for_network, network_tx, rx).await;
     });
 
     while !app.should_quit {
@@ -61,7 +67,14 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
                         app.should_quit = true;
                     }
                     KeyCode::Enter => {
+                        let command_tx = tx.clone();
+                        let input_to_process = app.input.clone();
                         app.input.clear();
+
+                        // Spawn a task to handle the command dispatch
+                        tokio::spawn(async move {
+                            command_cli::dispatch_command(&input_to_process, command_tx).await;
+                        });
                     }
                     KeyCode::Char(c) => {
                         app.input.push(c);
