@@ -1,11 +1,13 @@
 /* src/main.rs */
 
-mod setup;
+mod console;
 mod quic;
+mod setup;
 mod wsm;
 
-use setup::gen_conf::generate_default_config;
+use crate::console::cli::run_tui_client;
 use setup::config::Config;
+use setup::gen_conf::generate_default_config;
 use std::env;
 
 #[tokio::main]
@@ -18,19 +20,24 @@ async fn main() {
 
     if args.len() == 1 {
         generate_default_config("anchr.toml");
-        println!("> Default config and certificate generated");
+        println!("> Default config and certificate generated. Use '-c anchr.toml' to run.");
         return;
     }
 
     if args.len() == 3 && args[1] == "-c" {
-        let config = Config::from_file(&args[2]);
+        let config_path = &args[2];
+        let config = Config::from_file(config_path);
         if config.setup.mode == "server" {
             quic::bootstrap::start_quic_server(config).await;
         } else if config.setup.mode == "client" {
-            quic::client::start_quic_client(config).await;
+            // Run the new TUI client instead of the old one.
+            if let Err(e) = run_tui_client(config).await {
+                // Print to stderr to avoid interfering with TUI cleanup.
+                eprintln!("\nApplication Error: {}\n", e);
+            }
         }
         return;
     }
 
-    println!("! Invalid usage");
+    println!("! Invalid usage. Use '-c <config_path>' to run or no arguments to generate a default config.");
 }

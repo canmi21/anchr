@@ -8,8 +8,8 @@
 
 This project is in an early, **heavily experimental** stage.
 
-- ❌ **Issues and pull requests are not accepted** at this time.  
-- 🔧 **Breaking changes** can and will occur frequently without notice.  
+- ❌ **Issues and pull requests are not accepted** at this time.
+- 🔧 **Breaking changes** can and will occur frequently without notice.
 - 🧪 Intended for internal testing and development only.
 
 ## 🚧 Use at your own risk

@@ -5,6 +5,7 @@ use crate::setup::config::Config;
 use crate::wsm::endpoints::{self, AuthState, InFlightPings};
 use crate::wsm::header::{PayloadType, WsmHeader};
 use crate::wsm::msg_id;
+use log::{debug, error, info, warn};
 use quinn::{ClientConfig, Endpoint};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use std::collections::HashMap;
@@ -20,30 +21,30 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-pub async fn start_quic_client(cfg: Config) {
-    println!("> Client starting...");
+pub async fn run_network_tasks(cfg: Config) {
+    info!("Network task starting...");
     let mut first_failure_time: Option<Instant> = None;
     let stop_reconnecting = Arc::new(AtomicBool::new(false));
 
     loop {
         if stop_reconnecting.load(Ordering::SeqCst) {
-            println!("! Halting reconnection attempts due to fatal error.");
+            error!("Halting reconnection attempts due to fatal error.");
             break;
         }
 
-        println!("> Attempting to connect to the server...");
+        info!("Attempting to connect to the server...");
         match connect_and_run(&cfg, stop_reconnecting.clone()).await {
             Ok(_) => {
-                println!("> Connection closed gracefully. Exiting.");
+                info!("Connection closed gracefully. Exiting network task.");
                 break;
             }
             Err(e) => {
                 if stop_reconnecting.load(Ordering::SeqCst) {
-                    println!("! Halting reconnection attempts due to fatal error: {}", e);
+                    error!("Halting reconnection attempts due to fatal error: {}", e);
                     break;
                 }
 
-                println!("! Connection error: {}. Retrying in 3 seconds...", e);
+                warn!("Connection error: {}. Retrying in 3 seconds...", e);
                 let now = Instant::now();
                 let first_fail = first_failure_time.get_or_insert(now);
                 if now.duration_since(*first_fail) > Duration::from_secs(30) {
@@ -80,10 +81,10 @@ async fn connect_and_run(
     let remote_addr: SocketAddr = addr_str.to_socket_addrs()?.next().ok_or("Invalid address")?;
 
     let connection = endpoint.connect(remote_addr, "localhost")?.await?;
-    println!("+ Connection established with {}", connection.remote_address());
+    info!("Connection established with {}", connection.remote_address());
 
     let (mut control_send, mut control_recv) = connection.open_bi().await?;
-    println!("+ Control stream opened for bidirectional communication.");
+    info!("Control stream opened for bidirectional communication.");
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
     let in_flight_pings: InFlightPings = Arc::new(Mutex::new(HashMap::new()));
@@ -92,7 +93,7 @@ async fn connect_and_run(
     tokio::spawn(async move {
         while let Some(msg_bytes) = rx.recv().await {
             if let Err(e) = control_send.write_all(&msg_bytes).await {
-                println!("! Client failed to send message: {}", e);
+                error!("Client failed to send message: {}", e);
                 break;
             }
         }
@@ -107,15 +108,15 @@ async fn connect_and_run(
             if let Some(ping_msg) = keepalive::build_client_ping().await {
                 let msg_id = ping_msg[1];
                 if log_cfg.setup.log_level == "debug" {
-                    println!("> Queueing keep-alive PING (id: {})", msg_id);
+                    debug!("Queueing keep-alive PING (id: {})", msg_id);
                 }
                 pings_to_track.lock().await.insert(msg_id, Instant::now());
                 if let Err(e) = ping_tx.send(ping_msg.to_vec()).await {
-                    println!("! Failed to queue PING: {}", e);
+                    error!("Failed to queue PING: {}", e);
                     break;
                 }
             } else {
-                println!("! Failed to create PING: message ID pool is full.");
+                error!("Failed to create PING: message ID pool is full.");
             }
         }
     });
@@ -134,7 +135,7 @@ async fn connect_and_run(
                 }
             }
             if let Some(msg_id) = timed_out {
-                println!("! PONG for msg_id {} not received in 500ms. Closing connection.", msg_id);
+                warn!("PONG for msg_id {} not received in 500ms. Closing connection.", msg_id);
                 conn_for_timeout.close(1u32.into(), b"PONG timeout");
                 pings.clear();
                 break;
@@ -151,10 +152,10 @@ async fn connect_and_run(
     );
     let mut auth_request = auth_header.to_bytes().to_vec();
     auth_request.extend_from_slice(auth_token);
-    println!("> Sending authentication request...");
+    info!("Sending authentication request...");
     tx.send(auth_request).await?;
 
-    println!("> Client is now listening for responses...");
+    info!("Client is now listening for responses...");
     let mut header_buf = [0u8; 8];
     let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
         match control_recv.read_exact(&mut header_buf).await {
@@ -170,12 +171,12 @@ async fn connect_and_run(
                 )
                 .await
                 {
-                    println!("! Dispatcher requested termination (auth failure).");
+                    error!("Dispatcher requested termination (auth failure).");
                     break Err("Authentication failed".into());
                 }
             }
             Err(e) => {
-                println!("! Client connection lost: {}. Triggering reconnect...", e);
+                warn!("Client connection lost: {}. Triggering reconnect...", e);
                 break Err(Box::new(e));
             }
         }

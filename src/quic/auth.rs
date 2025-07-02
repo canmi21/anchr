@@ -3,6 +3,7 @@
 use crate::setup::config::Config;
 use crate::wsm::endpoints::AuthState;
 use crate::wsm::header::{PayloadType, WsmHeader, RESERVED_FINAL_FLAG, OPCODE_ERROR_FATAL};
+use log::info;
 use quinn::RecvStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -61,7 +62,8 @@ pub async fn handle_auth_response(
 ) -> bool {
     if header.is_final() {
         if header.payload_len == 0 {
-            println!("  -> WSM: Authentication successful.");
+            // FIX: Use info! macro to log to the client's TUI
+            info!("WSM: Authentication successful.");
             let mut state = auth_state.lock().await;
             *state = AuthState::Authenticated;
             return true;
@@ -69,9 +71,10 @@ pub async fn handle_auth_response(
             let mut reason_buf = vec![0; header.payload_len as usize];
             if recv.read_exact(&mut reason_buf).await.is_ok() {
                 let reason = String::from_utf8_lossy(&reason_buf);
-                println!("! WSM: Authentication failed. Reason: {}", reason);
+                // This is also a client-side print, so it should be a log macro
+                info!("! WSM: Authentication failed. Reason: {}", reason);
             } else {
-                println!("! WSM: Authentication failed. Could not read reason.");
+                info!("! WSM: Authentication failed. Could not read reason.");
             }
             stop_reconnecting.store(true, Ordering::SeqCst);
             return false;
