@@ -240,7 +240,6 @@ async fn connect_and_run(
                 stats
                     .last_msg_id
                     .store(header.message_id, Ordering::Relaxed);
-                
                 // Pass context to the dispatcher in the main loop as well
                 if let ControlFlow::Break(_) = endpoints::dispatch_client(
                     &header,

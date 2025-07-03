@@ -3,6 +3,7 @@
 use crate::console::app::Stats;
 use crate::quic::{auth, keepalive};
 use crate::rfs::{self, SharedUploadContext, UploadState};
+use crate::quic::service::OngoingUploads;
 use crate::setup::config::Config;
 use crate::wsm::header::{WsmHeader, OPCODE_ERROR_FATAL};
 use crate::wsm::msg_id;
@@ -30,6 +31,7 @@ pub async fn dispatch_server(
     tx: mpsc::Sender<Vec<u8>>,
     auth_state: Arc<Mutex<AuthState>>,
     cfg: &Config,
+    ongoing_uploads: OngoingUploads,
 ) -> ControlFlow<()> {
     let state = *auth_state.lock().await;
     if state == AuthState::Unauthenticated && !matches!(header.opcode, 0x01 | 0x03) {
@@ -47,8 +49,9 @@ pub async fn dispatch_server(
         }
         // Delegate RFS logic to the rfs module
         0x05 => rfs::list::handle_request(header.message_id, tx, cfg).await,
-        0x06 => rfs::upload::handle_init_request(header, recv, tx, cfg).await,
+        0x06 => rfs::upload::handle_init_request(header, recv, tx, cfg, ongoing_uploads).await,
         0x07 => rfs::upload::handle_worker_request(header, recv, tx).await,
+        0x10 => rfs::upload::handle_finalize_request(header, recv, tx, cfg, ongoing_uploads).await,
         _ => {
             eprintln!("! WSM-Server: Received unknown opcode: {:#04X}", header.opcode);
         }
@@ -63,7 +66,7 @@ pub async fn dispatch_client(
     in_flight_pings: InFlightPings,
     auth_state: Arc<Mutex<AuthState>>,
     stop_reconnecting: Arc<AtomicBool>,
-    cfg: &Config,
+    _cfg: &Config,
     stats: Stats,
     context: SharedUploadContext,
     tx: mpsc::Sender<Vec<u8>>,
@@ -87,13 +90,30 @@ pub async fn dispatch_client(
                                     2 => log::info!("> Server acknowledged RESUMABLE upload."),
                                     _ => log::warn!("> Server sent unknown ACK code."),
                                 }
-                                rfs::upload::handle_init_ack(context, tx).await;
+                                rfs::upload::handle_init_ack(context.clone(), tx).await;
                             } else {
                                 log::error!("> Server sent invalid ACK for upload initiation.");
+                                *context.lock().await = None; // Clear context on error
                             }
                         }
                         UploadState::WorkersOpening => {
-                            rfs::upload::handle_worker_ack(context, connection).await;
+                            // MODIFIED: Pass the main control stream's tx channel
+                            rfs::upload::handle_worker_ack(context.clone(), connection, tx.clone()).await;
+                        }
+                        UploadState::Finishing => {
+                            if header.payload_len == 1 {
+                                let mut payload = [0; 1];
+                                if recv.read_exact(&mut payload).await.is_ok() {
+                                    if payload[0] == 1 { // 1 = Success
+                                        log::info!("> Upload completed successfully!");
+                                    } else {
+                                        log::error!("! Upload failed during server-side finalization.");
+                                    }
+                                }
+                            } else {
+                                log::error!("! Received invalid finalization response from server.");
+                            }
+                            *context.lock().await = None; // Clear context, finishing the upload process
                         }
                         _ => {}
                     }
@@ -101,6 +121,7 @@ pub async fn dispatch_client(
                     return ControlFlow::Continue(());
                 }
             }
+
             drop(context_lock);
             if *auth_state.lock().await == AuthState::Unauthenticated {
                 if !auth::handle_auth_response(header, recv, auth_state, stop_reconnecting).await {
@@ -108,7 +129,7 @@ pub async fn dispatch_client(
                 }
             }
         }
-        0x02 => keepalive::handle_pong_response(header.message_id, in_flight_pings, cfg).await,
+        0x02 => keepalive::handle_pong_response(header.message_id, in_flight_pings, _cfg).await,
         0x04 => rfs::list::handle_response(header, recv).await,
         OPCODE_ERROR_FATAL => {
             log::error!("! WSM-Client: Received fatal error from server.");
