@@ -18,7 +18,8 @@ pub async fn start_quic_server(cfg: Config) {
     .expect("Failed to find private key");
 
     let mut transport = TransportConfig::default();
-    transport.max_concurrent_bidi_streams(10u32.into());
+    // MODIFIED: Increased stream limit to support 1 control stream + 16 worker streams
+    transport.max_concurrent_bidi_streams(20u32.into());
     transport.keep_alive_interval(Some(Duration::from_secs(5)));
 
     let mut server_config = ServerConfig::with_single_cert(certs, key).unwrap();

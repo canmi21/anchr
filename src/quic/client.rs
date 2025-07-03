@@ -2,6 +2,7 @@
 
 use crate::console::app::Stats;
 use crate::quic::keepalive;
+use crate::rfs::{SharedUploadContext};
 use crate::setup::config::Config;
 use crate::wsm::endpoints::{self, AuthState, InFlightPings};
 use crate::wsm::header::{PayloadType, WsmHeader};
@@ -27,6 +28,7 @@ pub async fn run_network_tasks(
     stats: Stats,
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
+    context: SharedUploadContext, // Receive context from the TUI entry point
 ) {
     info!("Network task starting...");
     let mut first_failure_time: Option<Instant> = None;
@@ -47,6 +49,7 @@ pub async fn run_network_tasks(
             stats.clone(),
             tx.clone(),
             Arc::clone(&rx_arc),
+            context.clone(), // Pass the context down to the connection handler
         )
         .await
         {
@@ -63,8 +66,7 @@ pub async fn run_network_tasks(
                 let now = Instant::now();
                 let first_fail = first_failure_time.get_or_insert(now);
                 if now.duration_since(*first_fail) > Duration::from_secs(30) {
-                    // This is now a backup clear; the primary clear is on successful auth.
-                    msg_id::clear_msg_id_pool().await; // MODIFIED
+                    msg_id::clear_msg_id_pool().await;
                     first_failure_time = None;
                 }
                 time::sleep(Duration::from_secs(3)).await;
@@ -79,6 +81,7 @@ async fn connect_and_run(
     stats: Stats,
     tx: mpsc::Sender<Vec<u8>>,
     rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    context: SharedUploadContext, // Receive context from run_network_tasks
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut roots = RootCertStore::empty();
     let cert_file = File::open(&cfg.setup.certificate)?;
@@ -111,6 +114,7 @@ async fn connect_and_run(
     let stats_for_sender = stats.clone();
     tokio::spawn(async move {
         while let Some(msg_bytes) = rx.lock().await.recv().await {
+            // The temporary hack is now removed. All messages are sent directly.
             if let Err(e) = control_send.write_all(&msg_bytes).await {
                 error!("Client failed to send message: {}", e);
                 break;
@@ -132,7 +136,7 @@ async fn connect_and_run(
     let mut auth_request = auth_header.to_bytes().to_vec();
     auth_request.extend_from_slice(auth_token);
     info!("Sending authentication request...");
-    tx.send(auth_request).await?;
+    let _ = tx.send(auth_request).await;
 
     let mut header_buf = [0u8; 8];
     match control_recv.read_exact(&mut header_buf).await {
@@ -142,6 +146,8 @@ async fn connect_and_run(
             stats
                 .last_msg_id
                 .store(header.message_id, Ordering::Relaxed);
+
+            // Pass the context to the dispatcher
             if let ControlFlow::Break(_) = endpoints::dispatch_client(
                 &header,
                 &mut control_recv,
@@ -150,6 +156,9 @@ async fn connect_and_run(
                 stop_reconnecting.clone(),
                 cfg,
                 stats.clone(),
+                context.clone(),
+                tx.clone(),
+                Arc::new(connection.clone()),
             )
             .await
             {
@@ -166,7 +175,6 @@ async fn connect_and_run(
         }
     };
 
-    // Check auth state after handling the response
     if *auth_state.lock().await != AuthState::Authenticated {
         return Err("Authentication was not successful.".into());
     }
@@ -223,7 +231,7 @@ async fn connect_and_run(
         }
     });
 
-    info!("Client is now in main loop, handling PONGs...");
+    info!("Client is now in main loop, handling messages...");
     let loop_result: Result<(), Box<dyn Error + Send + Sync>> = loop {
         match control_recv.read_exact(&mut header_buf).await {
             Ok(()) => {
@@ -232,6 +240,8 @@ async fn connect_and_run(
                 stats
                     .last_msg_id
                     .store(header.message_id, Ordering::Relaxed);
+                
+                // Pass context to the dispatcher in the main loop as well
                 if let ControlFlow::Break(_) = endpoints::dispatch_client(
                     &header,
                     &mut control_recv,
@@ -240,6 +250,9 @@ async fn connect_and_run(
                     stop_reconnecting.clone(),
                     cfg,
                     stats.clone(),
+                    context.clone(),
+                    tx.clone(),
+                    Arc::new(connection.clone()),
                 )
                 .await
                 {

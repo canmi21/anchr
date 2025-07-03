@@ -4,6 +4,7 @@ use crate::{
     cli as command_cli,
     console::{app::App, ui},
     quic::client::run_network_tasks,
+    rfs, // Import the rfs module to get context types
     setup::config::Config,
     wsm::msg_id,
 };
@@ -16,10 +17,11 @@ use log::LevelFilter;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::atomic::Ordering;
+use std::sync::Arc; // Import Arc
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex}; // Import Mutex
 use tokio::time;
-use tui_logger::{init_logger, set_default_level, set_level_for_target}; // Import added
+use tui_logger::{init_logger, set_default_level, set_level_for_target};
 
 pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
     init_logger(LevelFilter::Trace).unwrap();
@@ -41,6 +43,10 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>(32);
 
+    // Create the shared context for the entire client session.
+    let shared_context: rfs::SharedUploadContext = Arc::new(Mutex::new(None));
+
+    // Stats updater task
     tokio::spawn(async move {
         loop {
             let count = msg_id::get_pool_size().await;
@@ -51,11 +57,14 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
         }
     });
 
+    // Network task now gets the context.
     let network_tx = tx.clone();
+    let network_context = shared_context.clone();
     tokio::spawn(async move {
-        run_network_tasks(cfg, stats_for_network, network_tx, rx).await;
+        run_network_tasks(cfg, stats_for_network, network_tx, rx, network_context).await;
     });
 
+    // Main UI loop
     while !app.should_quit {
         terminal.draw(|f| ui::draw(f, &app))?;
 
@@ -68,10 +77,17 @@ pub async fn run_tui_client(cfg: Config) -> io::Result<()> {
                     KeyCode::Enter => {
                         let command_tx = tx.clone();
                         let input_to_process = app.input.clone();
+                        let command_context = shared_context.clone(); // Clone context for the command.
                         app.input.clear();
 
                         tokio::spawn(async move {
-                            command_cli::dispatch_command(&input_to_process, command_tx).await;
+                            // Pass the context to the command dispatcher.
+                            command_cli::dispatch_command(
+                                &input_to_process,
+                                command_tx,
+                                command_context,
+                            )
+                            .await;
                         });
                     }
                     KeyCode::Char(c) => {

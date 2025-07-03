@@ -5,6 +5,7 @@ mod console;
 mod quic;
 mod setup;
 mod wsm;
+mod rfs;
 
 use crate::console::cli::run_tui_client;
 use setup::config::Config;
