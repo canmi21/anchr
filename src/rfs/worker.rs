@@ -13,10 +13,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs as tokio_fs; // Use Tokio's async filesystem module
-use tokio::io::{AsyncReadExt, AsyncSeekExt}; // Import async IO traits
+use tokio::io::{AsyncReadExt, AsyncSeekExt}; // async IO traits
 use tokio::sync::{mpsc, Mutex};
 
-pub const CHUNK_SIZE: u64 = 512 * 1024; // 512KB
+pub const CHUNK_SIZE: u64 = 4096 * 1024;
 
 type PendingChunkHashes = Arc<Mutex<HashMap<u64, [u8; 32]>>>;
 

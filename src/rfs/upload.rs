@@ -13,9 +13,10 @@ use quinn::{Connection, RecvStream};
 use std::sync::Arc;
 use tokio::fs as tokio_fs;
 use tokio::sync::mpsc;
+use tokio::task;
 use std::path::{Component, Path, PathBuf};
 
-const MAX_WORKERS: u8 = 16;
+const MAX_WORKERS: u8 = 32;
 
 pub fn calculate_workers(file_size: u64) -> u8 {
     if file_size == 0 {
@@ -199,25 +200,38 @@ pub async fn handle_finalize_request(
 
     match serde_json::from_slice::<UploadMetadata>(&payload_buf) {
         Ok(metadata) => {
-            println!("-> Received finalize request for '{}'", metadata.file_name);
-            // MODIFIED: Call the function from its new module
-            let success = verify::assemble_and_verify(&metadata, cfg).await;
-
-            ongoing_uploads.lock().await.remove(&metadata.file_hash);
-
-            let ack_code: u8 = if success { 1 } else { 0 };
-            let response_header = WsmHeader::with_reserved(
-                0x00,
-                header.message_id,
-                PayloadType::Raw,
-                1,
-                RESERVED_FINAL_FLAG,
+            println!(
+                "-> Received finalize request for '{}'. Spawning blocking task for assembly...",
+                metadata.file_name
             );
-            let mut response = response_header.to_bytes().to_vec();
-            response.push(ack_code);
-            if tx.send(response).await.is_err() {
-                eprintln!("! WSM-Server: Failed to send finalize 'ACK' response.");
-            }
+
+            let meta_clone = metadata.clone();
+            let cfg_clone = cfg.clone();
+            let message_id = header.message_id;
+
+            tokio::spawn(async move {
+                let success = task::spawn_blocking(move || {
+                    verify::assemble_and_verify_blocking(&meta_clone, &cfg_clone)
+                })
+                .await
+                .unwrap_or(false);
+
+                ongoing_uploads.lock().await.remove(&metadata.file_hash);
+
+                let ack_code: u8 = if success { 1 } else { 0 };
+                let response_header = WsmHeader::with_reserved(
+                    0x00,
+                    message_id,
+                    PayloadType::Raw,
+                    1,
+                    RESERVED_FINAL_FLAG,
+                );
+                let mut response = response_header.to_bytes().to_vec();
+                response.push(ack_code);
+                if tx.send(response).await.is_err() {
+                    eprintln!("! WSM-Server: Failed to send finalize 'ACK' response.");
+                }
+            });
         }
         Err(e) => {
             eprintln!(
@@ -292,7 +306,6 @@ pub async fn prepare_upload_directory(
     Ok(PreparationResult::New)
 }
 
-// MODIFIED: Make this function public so `verify.rs` can access it.
 pub fn resolve_and_validate_path(target_dir: &str, cfg: &Config) -> Result<PathBuf, String> {
     let virtual_path = Path::new(target_dir);
     let mut components = virtual_path.components();

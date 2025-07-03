@@ -5,7 +5,7 @@ use crate::wsm::header::{PayloadType, WsmHeader, RESERVED_FINAL_FLAG};
 use quinn::RecvStream;
 use tokio::sync::mpsc;
 
-/// [SERVER-SIDE] Handles the `rfs list` (0x05) request.
+// [SERVER-SIDE] Handles the `rfs list` (0x05) request.
 pub async fn handle_request(message_id: u8, tx: mpsc::Sender<Vec<u8>>, cfg: &Config) {
     let rfs_list = cfg.rfs.as_ref().unwrap();
     match serde_json::to_string(rfs_list) {
@@ -30,7 +30,7 @@ pub async fn handle_request(message_id: u8, tx: mpsc::Sender<Vec<u8>>, cfg: &Con
     }
 }
 
-/// [CLIENT-SIDE] Handles the `rfs list` (0x04) response.
+// [CLIENT-SIDE] Handles the `rfs list` (0x04) response.
 pub async fn handle_response(header: &WsmHeader, recv: &mut RecvStream) {
     if header.payload_len == 0 {
         log::info!("> Received empty volume list from server.");

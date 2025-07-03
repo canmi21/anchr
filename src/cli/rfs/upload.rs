@@ -6,8 +6,8 @@ use crate::wsm::msg_id;
 use log::{error, info, warn};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::{Path};
+use std::time::Instant;
 use tokio::fs as tokio_fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -31,7 +31,7 @@ pub async fn execute(
     let local_path_str = args[1];
     let local_path = Path::new(local_path_str);
 
-    let metadata = match fs::metadata(local_path) {
+    let metadata = match tokio_fs::metadata(local_path).await {
         Ok(meta) => {
             if !meta.is_file() {
                 error!("'{}' is not a file.", local_path_str);
@@ -60,7 +60,7 @@ pub async fn execute(
         return;
     }
 
-    // --- MODIFIED: Calculate hash asynchronously to prevent blocking ---
+    let start_time = Instant::now(); // Record start time
     let file_hash = match calculate_hash_async(local_path).await {
         Ok(hash) => hash,
         Err(e) => {
@@ -90,6 +90,7 @@ pub async fn execute(
             chunk_queue: Default::default(),
             total_chunks: 0,
             completed_chunks: Default::default(),
+            start_time, // Store start time in context
         });
 
         let header = WsmHeader::new(
@@ -103,8 +104,8 @@ pub async fn execute(
         message.extend_from_slice(json_payload.as_bytes());
 
         info!(
-            "Initiating upload for '{}' ({} bytes)...",
-            upload_meta.file_name, upload_meta.file_size
+            "Initiating upload for '{}'...",
+            upload_meta.file_name
         );
         if tx.send(message).await.is_err() {
             error!("Failed to send upload initiation command.");
@@ -121,7 +122,7 @@ pub async fn execute(
     }
 }
 
-/// A helper function to calculate file hash asynchronously.
+// calculate file hash asynchronously.
 async fn calculate_hash_async(file_path: &Path) -> std::io::Result<String> {
     let mut file = tokio_fs::File::open(file_path).await?;
     let mut hasher = Sha256::new();

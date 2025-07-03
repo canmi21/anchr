@@ -5,12 +5,14 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 pub mod list;
+pub mod stats;
 pub mod upload;
-pub mod worker;
 pub mod verify;
+pub mod worker;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UploadMetadata {
@@ -37,6 +39,7 @@ pub struct UploadContext {
     pub chunk_queue: Arc<Mutex<VecDeque<u64>>>,
     pub total_chunks: u64,
     pub completed_chunks: Arc<AtomicU64>,
+    pub start_time: Instant,
 }
 
 pub type SharedUploadContext = Arc<Mutex<Option<UploadContext>>>;

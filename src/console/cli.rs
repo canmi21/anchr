@@ -4,7 +4,7 @@ use crate::{
     cli as command_cli,
     console::{app::App, ui},
     quic::client::run_network_tasks,
-    rfs, // Import the rfs module to get context types
+    rfs,
     setup::config::Config,
     wsm::msg_id,
 };
@@ -17,9 +17,9 @@ use log::LevelFilter;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::atomic::Ordering;
-use std::sync::Arc; // Import Arc
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex}; // Import Mutex
+use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 use tui_logger::{init_logger, set_default_level, set_level_for_target};
 
