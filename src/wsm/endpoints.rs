@@ -50,7 +50,7 @@ pub async fn dispatch_server(
         // Delegate RFS logic to the rfs module
         0x05 => rfs::list::handle_request(header.message_id, tx, cfg).await,
         0x06 => rfs::upload::handle_init_request(header, recv, tx, cfg, ongoing_uploads).await,
-        0x07 => rfs::upload::handle_worker_request(header, recv, tx).await,
+        0x07 => rfs::upload::handle_worker_request(header, recv, tx, cfg).await,
         0x10 => rfs::upload::handle_finalize_request(header, recv, tx, cfg, ongoing_uploads).await,
         _ => {
             eprintln!("! WSM-Server: Received unknown opcode: {:#04X}", header.opcode);

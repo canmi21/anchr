@@ -35,7 +35,9 @@ pub async fn handle_connection(conn: Connection, cfg: Config) {
         }
     };
     let (mut control_send, mut control_recv) = control_stream;
-    println!("  -- Control stream {} established.", control_send.id());
+    if cfg.setup.log_level == "debug" {
+        println!("  -- Control stream {} established.", control_send.id());
+    }
 
     // --- Step 2: NOW, spawn a task to handle all SUBSEQUENT worker streams ---
     let conn_clone = conn.clone();
@@ -45,7 +47,9 @@ pub async fn handle_connection(conn: Connection, cfg: Config) {
         loop {
             match conn_clone.accept_bi().await {
                 Ok((send, recv)) => {
-                    println!("  + Accepted a new worker stream.");
+                    if cfg_clone.setup.log_level == "debug" {
+                        println!("  + Accepted a new worker stream.");
+                    }
                     let worker_cfg = cfg_clone.clone();
                     let worker_state = state_clone.clone();
                     tokio::spawn(async move {
@@ -53,7 +57,9 @@ pub async fn handle_connection(conn: Connection, cfg: Config) {
                     });
                 }
                 Err(e) => {
-                    println!("! Error accepting worker stream: {}. Stopping worker listener.", e);
+                    if cfg_clone.setup.log_level == "debug" {
+                        println!("! Error accepting worker stream: {}. Stopping worker listener.", e);
+                    }
                     break;
                 }
             }

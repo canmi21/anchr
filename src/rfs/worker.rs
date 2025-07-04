@@ -16,7 +16,7 @@ use tokio::fs as tokio_fs; // Use Tokio's async filesystem module
 use tokio::io::{AsyncReadExt, AsyncSeekExt}; // async IO traits
 use tokio::sync::{mpsc, Mutex};
 
-pub const CHUNK_SIZE: u64 = 4096 * 1024;
+pub const CHUNK_SIZE: u64 = 512 * 1024;
 
 type PendingChunkHashes = Arc<Mutex<HashMap<u64, [u8; 32]>>>;
 
@@ -259,11 +259,15 @@ pub async fn handle_worker_stream(
                 }
             }
             Err(quinn::ReadExactError::ReadError(quinn::ReadError::ConnectionLost(_))) => {
-                println!("-> Worker: Connection lost gracefully.");
+                if cfg.setup.log_level == "debug" {
+                    println!("-> Worker: Connection lost gracefully.");
+                }
                 break;
             }
             Err(quinn::ReadExactError::FinishedEarly(_)) => {
-                println!("-> Worker: Stream finished early.");
+                if cfg.setup.log_level == "debug" {
+                    println!("-> Worker: Stream finished early.");
+                }
                 break;
             }
             Err(e) => {
@@ -272,10 +276,12 @@ pub async fn handle_worker_stream(
             }
         }
     }
-    println!(
-        "-> Worker stream finished for '{}'.",
-        upload_metadata.file_name
-    );
+    if cfg.setup.log_level == "debug" {
+        println!(
+            "-> Worker stream finished for '{}'.",
+            upload_metadata.file_name
+        );
+    }
 }
 
 async fn handle_chunk_inquiry(
@@ -360,7 +366,9 @@ async fn handle_chunk_data(
             let chunk_path = tmp_dir_path.join(format!("chunk_{}", chunk_id));
             if tokio_fs::write(chunk_path, chunk_data).await.is_ok() {
                 is_final = true;
-                println!("   - Worker: Saved chunk #{} successfully.", chunk_id);
+                if cfg.setup.log_level == "debug" {
+                    println!("   - Worker: Saved chunk #{} successfully.", chunk_id);
+                }
             } else {
                 eprintln!("! Worker: Failed to write chunk #{} to disk.", chunk_id);
             }

@@ -119,8 +119,8 @@ pub async fn handle_init_request(
     match serde_json::from_slice::<UploadMetadata>(&payload_buf) {
         Ok(metadata) => {
             println!(
-                "-> Received upload initiation request (id: {}):",
-                header.message_id
+                "-> Received upload initiation for '{}'.",
+                metadata.file_name
             );
             match prepare_upload_directory(&metadata, cfg).await {
                 Ok(prep_result) => {
@@ -142,8 +142,8 @@ pub async fn handle_init_request(
                 }
                 Err(e) => {
                     eprintln!(
-                        "! WSM-Server: Failed to prepare upload for id {}: {}",
-                        header.message_id, e
+                        "! WSM-Server: Failed to prepare upload for '{}': {}",
+                        metadata.file_name, e
                     );
                 }
             }
@@ -161,6 +161,7 @@ pub async fn handle_worker_request(
     header: &WsmHeader,
     recv: &mut RecvStream,
     tx: mpsc::Sender<Vec<u8>>,
+    cfg: &Config,
 ) {
     if header.payload_len != 1 {
         eprintln!("! WSM-Server: Received worker request with invalid payload size.");
@@ -171,11 +172,13 @@ pub async fn handle_worker_request(
         eprintln!("! WSM-Server: Failed to read worker request payload.");
         return;
     }
-    let num_workers = payload_buf[0];
-    println!(
-        "-> Received request to open {} worker stream(s).",
-        num_workers
-    );
+    if cfg.setup.log_level == "debug" {
+        let num_workers = payload_buf[0];
+        println!(
+            "-> Received request to open {} worker stream(s).",
+            num_workers
+        );
+    }
     let response_header = WsmHeader::new(0x00, header.message_id, PayloadType::Raw, 0);
     let response = response_header.to_bytes().to_vec();
     if tx.send(response).await.is_err() {
@@ -268,28 +271,38 @@ pub async fn prepare_upload_directory(
         .await
         .unwrap_or(false)
     {
-        println!("   - Lock file found. Checking for resumable upload...");
+        if cfg.setup.log_level == "debug" {
+            println!("   - Lock file found. Checking for resumable upload...");
+        }
         let existing_hash = tokio_fs::read_to_string(&hash_file_path)
             .await
             .map_err(|e| format!("Failed to read existing hash file: {}", e))?;
         if existing_hash.trim() == metadata.file_hash {
-            println!("   - Hashes match. This is a resumable upload.");
+            if cfg.setup.log_level == "debug" {
+                println!("   - Hashes match. This is a resumable upload.");
+            }
             return Ok(PreparationResult::Resumable);
         } else {
-            println!("   - Hashes do not match. Cleaning up stale upload files...");
+            if cfg.setup.log_level == "debug" {
+                println!("   - Hashes do not match. Cleaning up stale upload files...");
+            }
             tokio_fs::remove_file(&lock_file_path).await.ok();
             tokio_fs::remove_file(&hash_file_path).await.ok();
             if tokio_fs::try_exists(&tmp_dir_path).await.unwrap_or(false) {
                 tokio_fs::remove_dir_all(&tmp_dir_path).await.ok();
             }
-            println!("   - Stale files cleaned up.");
+            if cfg.setup.log_level == "debug" {
+                println!("   - Stale files cleaned up.");
+            }
         }
     }
 
-    println!(
-        "   - Preparing for new upload at: {}",
-        final_path.to_string_lossy()
-    );
+    if cfg.setup.log_level == "debug" {
+        println!(
+            "   - Preparing for new upload at: {}",
+            final_path.to_string_lossy()
+        );
+    }
     tokio_fs::create_dir_all(&final_path)
         .await
         .map_err(|e| format!("Failed to create target directory: {}", e))?;
@@ -302,7 +315,9 @@ pub async fn prepare_upload_directory(
     tokio_fs::create_dir_all(&tmp_dir_path)
         .await
         .map_err(|e| format!("Failed to create .tmp directory: {}", e))?;
-    println!("   - Lock, hash, and tmp directory created successfully.");
+    if cfg.setup.log_level == "debug" {
+        println!("   - Lock, hash, and tmp directory created successfully.");
+    }
     Ok(PreparationResult::New)
 }
 
